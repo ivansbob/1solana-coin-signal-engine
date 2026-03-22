@@ -364,9 +364,10 @@ def _status_from_missing(missing_evidence: list[str]) -> str:
 
 def _entry_decision(context: dict[str, Any], regime: dict[str, Any], token_payload: dict[str, Any]) -> tuple[str, list[str]]:
     explicit = str(context.get("entry_decision") or context.get("decision") or "").strip().upper()
-    reasons: list[str] = []
     if explicit in {"ENTER", "PAPER_ENTER", "BUY", "OPEN"}:
         return "ENTER", ["historical_entry_artifact"]
+    if explicit in {"SCALP", "TREND"}:
+        return "ENTER", [f"historical_regime_{explicit.lower()}"]
     if explicit in {"IGNORE", "SKIP", "BLOCKED", "REJECT"}:
         return "IGNORE", [f"historical_decision_{explicit.lower()}"]
     if token_payload.get("trades") or token_payload.get("positions"):
@@ -963,7 +964,8 @@ def replay_token_lifecycle(
     state.open_position(entry_time=entry["entry_time"], entry_price=entry.get("entry_price"))
     log_info("replay_position_opened", run_id=run_id, token_address=token_address, entry_time=entry["entry_time"])
 
-    exit_payload = _resolve_exit(base_context, entry, token_payload, str(regime.get("regime_decision") or "SCALP").upper(), state, settings)
+    effective_exit_regime = str(historical_regime_decision or regime.get("regime_decision") or "SCALP").upper()
+    exit_payload = _resolve_exit(base_context, entry, token_payload, effective_exit_regime, state, settings)
     if exit_payload.get("warning"):
         log_warning("replay_unresolved", run_id=run_id, token_address=token_address, warning=exit_payload["warning"])
     elif exit_payload.get("exit_decision") == "FULL_EXIT":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from src.replay import historical_replay_harness as replay_harness
 from src.replay.historical_replay_harness import _build_settings, run_historical_replay
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -145,3 +146,176 @@ def test_historical_replay_matrix_includes_discovery_lag_and_tx_lake_provenance(
     assert row["tx_batch_freshness"] == "stale_cache_allowed"
     assert row["tx_fetch_mode"] == "upstream_failed_use_stale"
     assert row["tx_batch_warning"] == "upstream_failed_use_stale"
+
+
+def test_historical_replay_treats_explicit_scalp_signal_as_enter(tmp_path):
+    artifact_dir = tmp_path / "fixture_scalp_signal"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "scored_tokens.jsonl").write_text(json.dumps({
+        "token_address": "tok_scalp",
+        "pair_address": "pair_scalp",
+        "symbol": "SCLP",
+        "final_score": 91.0,
+        "final_score_pre_wallet": 88.0,
+        "entry_confidence": 0.82,
+        "recommended_position_pct": 0.25,
+        "effective_position_pct": 0.25,
+        "base_position_pct": 0.25,
+        "liquidity_usd": 40000.0,
+        "buy_pressure": 0.84,
+        "volume_velocity": 4.8,
+        "x_validation_score": 72.0,
+        "entry_price": 1.0,
+        "entry_time": "2026-03-10T12:00:00Z",
+        "features": {
+            "age_sec": 90,
+            "liquidity_usd": 40000.0,
+            "buy_pressure": 0.84,
+            "volume_velocity": 4.8,
+        },
+    }) + "\n", encoding="utf-8")
+    (artifact_dir / "signals.jsonl").write_text(json.dumps({
+        "token_address": "tok_scalp",
+        "pair_address": "pair_scalp",
+        "decision": "SCALP",
+        "entry_decision": "SCALP",
+        "regime_decision": "SCALP",
+        "ts": "2026-03-10T12:00:00Z",
+    }) + "\n", encoding="utf-8")
+    (artifact_dir / "price_paths.json").write_text(json.dumps([{
+        "token_address": "tok_scalp",
+        "pair_address": "pair_scalp",
+        "price_path": [
+            {"offset_sec": 0, "price": 1.0, "timestamp": "2026-03-10T12:00:00Z"},
+            {"offset_sec": 45, "price": 1.09, "timestamp": "2026-03-10T12:00:45Z"},
+            {"offset_sec": 90, "price": 0.97, "timestamp": "2026-03-10T12:01:30Z"},
+        ],
+    }]), encoding="utf-8")
+
+    result = run_historical_replay(
+        artifact_dir=artifact_dir,
+        run_id="unit_scalp_signal_enters",
+        config_path=ROOT / "config" / "replay.default.yaml",
+        output_base_dir=tmp_path,
+        dry_run=True,
+    )
+
+    assert result["artifacts"].signals[0]["entry_decision"] == "SCALP"
+    assert len(result["artifacts"].trades) == 1
+    assert len(result["artifacts"].trade_feature_matrix) == 1
+    assert result["artifacts"].positions[0]["status"] != "ignored"
+    assert result["artifacts"].trades[0]["entry_decision"] == "SCALP"
+    assert result["artifacts"].trades[0]["decision"] == "SCALP"
+
+
+def test_historical_replay_preserves_explicit_ignore_signal_as_ignore(tmp_path):
+    artifact_dir = tmp_path / "fixture_ignore_signal"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "scored_tokens.jsonl").write_text(json.dumps({
+        "token_address": "tok_ignore",
+        "pair_address": "pair_ignore",
+        "symbol": "IGN",
+        "final_score": 89.0,
+        "entry_price": 1.0,
+        "entry_time": "2026-03-10T12:00:00Z",
+    }) + "\n", encoding="utf-8")
+    (artifact_dir / "signals.jsonl").write_text(json.dumps({
+        "token_address": "tok_ignore",
+        "pair_address": "pair_ignore",
+        "decision": "IGNORE",
+        "entry_decision": "IGNORE",
+        "regime_decision": "SCALP",
+        "ts": "2026-03-10T12:00:00Z",
+    }) + "\n", encoding="utf-8")
+    (artifact_dir / "price_paths.json").write_text(json.dumps([{
+        "token_address": "tok_ignore",
+        "pair_address": "pair_ignore",
+        "price_path": [
+            {"offset_sec": 0, "price": 1.0, "timestamp": "2026-03-10T12:00:00Z"},
+            {"offset_sec": 45, "price": 1.09, "timestamp": "2026-03-10T12:00:45Z"},
+        ],
+    }]), encoding="utf-8")
+
+    result = run_historical_replay(
+        artifact_dir=artifact_dir,
+        run_id="unit_ignore_signal_ignored",
+        config_path=ROOT / "config" / "replay.default.yaml",
+        output_base_dir=tmp_path,
+        dry_run=True,
+    )
+
+    assert result["artifacts"].signals[0]["entry_decision"] == "IGNORE"
+    assert result["artifacts"].trades == []
+    assert result["artifacts"].trade_feature_matrix == []
+    assert result["artifacts"].positions[0]["status"] == "ignored"
+
+
+def test_historical_replay_uses_historical_regime_for_exit_resolution(tmp_path, monkeypatch):
+    artifact_dir = tmp_path / "fixture_historical_regime_exit"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "scored_tokens.jsonl").write_text(json.dumps({
+        "token_address": "tok_trend",
+        "pair_address": "pair_trend",
+        "symbol": "TRND",
+        "final_score": 93.0,
+        "entry_price": 1.0,
+        "entry_time": "2026-03-10T12:00:00Z",
+        "recommended_position_pct": 0.2,
+    }) + "\n", encoding="utf-8")
+    (artifact_dir / "signals.jsonl").write_text(json.dumps({
+        "token_address": "tok_trend",
+        "pair_address": "pair_trend",
+        "decision": "ENTER",
+        "entry_decision": "ENTER",
+        "regime_decision": "TREND",
+        "ts": "2026-03-10T12:00:00Z",
+    }) + "\n", encoding="utf-8")
+    (artifact_dir / "price_paths.json").write_text(json.dumps([{
+        "token_address": "tok_trend",
+        "pair_address": "pair_trend",
+        "price_path": [
+            {"offset_sec": 0, "price": 1.0, "timestamp": "2026-03-10T12:00:00Z"},
+            {"offset_sec": 60, "price": 1.01, "timestamp": "2026-03-10T12:01:00Z"},
+        ],
+    }]), encoding="utf-8")
+
+    calls = {"trend": 0, "scalp": 0}
+
+    def fake_trend_exit(position_ctx, current, settings):
+        calls["trend"] += 1
+        return {
+            "exit_decision": "FULL_EXIT",
+            "exit_reason": "trend_test_exit",
+            "exit_flags": ["trend_test_exit"],
+            "exit_warnings": [],
+        }
+
+    def fake_scalp_exit(position_ctx, current, settings):
+        calls["scalp"] += 1
+        return {
+            "exit_decision": None,
+            "exit_reason": None,
+            "exit_flags": [],
+            "exit_warnings": [],
+        }
+
+    monkeypatch.setattr(replay_harness, "evaluate_hard_exit", lambda position_ctx, current, settings: {
+        "exit_decision": None,
+        "exit_reason": None,
+        "exit_flags": [],
+        "exit_warnings": [],
+    })
+    monkeypatch.setattr(replay_harness, "evaluate_trend_exit", fake_trend_exit)
+    monkeypatch.setattr(replay_harness, "evaluate_scalp_exit", fake_scalp_exit)
+
+    result = run_historical_replay(
+        artifact_dir=artifact_dir,
+        run_id="unit_historical_regime_exit",
+        config_path=ROOT / "config" / "replay.default.yaml",
+        output_base_dir=tmp_path,
+        dry_run=True,
+    )
+
+    assert calls["trend"] >= 1
+    assert calls["scalp"] == 0
+    assert result["artifacts"].trades[0]["exit_reason_final"] == "trend_test_exit"
