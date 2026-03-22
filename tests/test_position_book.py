@@ -158,3 +158,78 @@ def test_partial_exit_handles_negative_realized_pnl_when_sol_strengthens():
 
     assert pos["remaining_size_sol"] == 8.0
     assert pos["realized_pnl_sol"] < 0.0
+
+def test_tiny_partial_fill_does_not_mark_partial_milestone():
+    state = {}
+    ensure_state(state, S())
+    pos = open_position(
+        {
+            "executed_price_usd": 1.0,
+            "filled_notional_sol": 10.0,
+            "filled_cost_basis_sol": 10.0,
+            "priority_fee_sol": 0.0,
+            "fill_ratio": 1.0,
+        },
+        {
+            "token_address": "SoTiny",
+            "symbol": "TNY",
+            "entry_decision": "TREND",
+            "entry_snapshot": {},
+            "contract_version": "paper_trader_v1",
+        },
+        state,
+    )
+    apply_partial_exit(
+        pos,
+        {
+            "filled_notional_sol": 0.3,
+            "requested_notional_sol": 3.0,
+            "filled_cost_basis_sol": 0.3,
+            "executed_price_usd": 1.2,
+            "priority_fee_sol": 0.0,
+            "fill_ratio": 0.1,
+            "exit_flags": ["partial_take_profit_1"],
+        },
+        state,
+    )
+
+    assert pos["partial_1_taken"] is False
+    assert "partial_1" not in pos["partials_taken"]
+
+
+def test_substantial_partial_fill_marks_partial_milestone():
+    state = {}
+    ensure_state(state, S())
+    pos = open_position(
+        {
+            "executed_price_usd": 1.0,
+            "filled_notional_sol": 10.0,
+            "filled_cost_basis_sol": 10.0,
+            "priority_fee_sol": 0.0,
+            "fill_ratio": 1.0,
+        },
+        {
+            "token_address": "SoBig",
+            "symbol": "BIG",
+            "entry_decision": "TREND",
+            "entry_snapshot": {},
+            "contract_version": "paper_trader_v1",
+        },
+        state,
+    )
+    apply_partial_exit(
+        pos,
+        {
+            "filled_notional_sol": 3.0,
+            "requested_notional_sol": 3.3,
+            "filled_cost_basis_sol": 3.0,
+            "executed_price_usd": 1.2,
+            "priority_fee_sol": 0.0,
+            "fill_ratio": 0.91,
+            "exit_flags": ["partial_take_profit_1"],
+        },
+        state,
+    )
+
+    assert pos["partial_1_taken"] is True
+    assert "partial_1" in pos["partials_taken"]
