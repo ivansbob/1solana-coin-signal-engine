@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import sys
@@ -29,6 +30,55 @@ RUNTIME_JSONL_PRECEDENCE = [
         "required_fields": ("token_address",),
     }
 ]
+
+
+def _coerce_finite_float(value: object, *, label: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise AssertionError(f"{label} must be numeric, got {value!r}") from exc
+    if not math.isfinite(number):
+        raise AssertionError(f"{label} must be finite, got {number!r}")
+    return number
+
+
+def _extract_trade_pnl(trade: dict[str, Any], *, scenario_name: str) -> tuple[float, float]:
+    gross_pnl_pct = _coerce_finite_float(trade.get("gross_pnl_pct"), label=f"{scenario_name}: gross_pnl_pct")
+    net_pnl_pct = _coerce_finite_float(trade.get("net_pnl_pct"), label=f"{scenario_name}: net_pnl_pct")
+    return gross_pnl_pct, net_pnl_pct
+
+
+def _assert_positive_equity(net_pnl_pct: float, *, scenario_name: str) -> float:
+    equity_sol = 1.0 + (net_pnl_pct / 100.0)
+    if equity_sol <= 0:
+        raise AssertionError(
+            f"{scenario_name}: equity_sol must stay positive, got {equity_sol} from net_pnl_pct={net_pnl_pct}"
+        )
+    return equity_sol
+
+
+def _scenario_economic_sanity(name: str, trade: dict[str, Any]) -> dict[str, Any]:
+    gross_pnl_pct, net_pnl_pct = _extract_trade_pnl(trade, scenario_name=name)
+    equity_sol = _assert_positive_equity(net_pnl_pct, scenario_name=name)
+
+    if name == "healthy":
+        if trade.get("replay_resolution_status") != "resolved":
+            raise AssertionError("healthy: replay_resolution_status must be resolved")
+        if net_pnl_pct <= 0:
+            raise AssertionError(f"healthy: expected positive net_pnl_pct, got {net_pnl_pct}")
+        if net_pnl_pct >= gross_pnl_pct:
+            raise AssertionError(
+                f"healthy: expected net_pnl_pct < gross_pnl_pct (gross={gross_pnl_pct}, net={net_pnl_pct})"
+            )
+        if equity_sol <= 1.0:
+            raise AssertionError(f"healthy: expected equity_sol > 1.0, got {equity_sol}")
+
+    return {
+        "gross_pnl_pct": round(gross_pnl_pct, 6),
+        "net_pnl_pct": round(net_pnl_pct, 6),
+        "equity_sol": round(equity_sol, 6),
+        "economic_sanity_status": "ok",
+    }
 
 
 def _read_json(path: Path) -> Any:
@@ -146,18 +196,16 @@ def _write_scenario_inputs(base_dir: Path, name: str) -> Path:
     return inputs_dir
 
 
-def _prepare_portfolio_state(target_dir: Path, result: dict[str, Any]) -> None:
+def _prepare_portfolio_state(target_dir: Path, result: dict[str, Any], *, scenario_name: str) -> None:
     trades = result["artifacts"].trades
     positions = result["artifacts"].positions
     net_pnl_pct = 0.0
     if trades:
-        try:
-            net_pnl_pct = float(trades[0].get("net_pnl_pct") or 0.0)
-        except (TypeError, ValueError):
-            net_pnl_pct = 0.0
+        net_pnl_pct = _coerce_finite_float(trades[0].get("net_pnl_pct"), label=f"{scenario_name}: net_pnl_pct")
+    equity_sol = _assert_positive_equity(net_pnl_pct, scenario_name=scenario_name)
     payload = {
         "starting_equity_sol": 1.0,
-        "equity_sol": 1.0 + (net_pnl_pct / 100.0),
+        "equity_sol": equity_sol,
         "unrealized_pnl_sol": 0.0,
         "total_signals": len(result["artifacts"].signals),
         "total_entries_attempted": len(trades),
@@ -173,7 +221,7 @@ def _prepare_analyzer_inputs(run_dir: Path, result: dict[str, Any]) -> Path:
     shutil.copyfile(run_dir / "signals.jsonl", analyzer_dir / "signals.jsonl")
     shutil.copyfile(run_dir / "trade_feature_matrix.jsonl", analyzer_dir / "trade_feature_matrix.jsonl")
     write_json(analyzer_dir / "positions.json", result["artifacts"].positions)
-    _prepare_portfolio_state(analyzer_dir, result)
+    _prepare_portfolio_state(analyzer_dir, result, scenario_name=run_dir.parent.name)
     return analyzer_dir
 
 
@@ -202,6 +250,8 @@ def _scenario_summary(name: str, result: dict[str, Any], run_dir: Path, analyzer
     analyzer_events = _read_jsonl_file(Path(analyzer_result.get("summary_path", "")).parent / "analyzer_events.jsonl") if analyzer_result.get("summary_path") else []
     matrix_loaded = next((event for event in analyzer_events if event.get("event") == "trade_feature_matrix_loaded"), {})
 
+    economic_sanity = _scenario_economic_sanity(name, trade)
+
     summary: dict[str, Any] = {
         "ok": True,
         "run_id": result["summary"]["run_id"],
@@ -225,6 +275,10 @@ def _scenario_summary(name: str, result: dict[str, Any], run_dir: Path, analyzer
         "x_validation_score": row.get("x_validation_score_entry"),
         "x_validation_delta": row.get("x_validation_delta_entry"),
         "selected_exit_reason": trade.get("exit_reason_final"),
+        "gross_pnl_pct": economic_sanity["gross_pnl_pct"],
+        "net_pnl_pct": economic_sanity["net_pnl_pct"],
+        "equity_sol": economic_sanity["equity_sol"],
+        "economic_sanity_status": economic_sanity["economic_sanity_status"],
         "trade_feature_matrix_path": str(run_dir / "trade_feature_matrix.jsonl"),
         "analyzer_summary_path": analyzer_result.get("summary_path"),
         "analyzer_report_path": analyzer_result.get("report_path"),
@@ -254,6 +308,11 @@ def _scenario_summary(name: str, result: dict[str, Any], run_dir: Path, analyzer
         raise AssertionError(f"{name}: runtime loader returned no rows")
     if not str(summary.get("analyzer_matrix_path") or "").endswith("trade_feature_matrix.jsonl"):
         raise AssertionError(f"{name}: analyzer did not consume replay trade_feature_matrix.jsonl")
+
+    if summary["economic_sanity_status"] != "ok":
+        raise AssertionError(f"{name}: economic_sanity_status must be ok")
+    if summary["equity_sol"] <= 0:
+        raise AssertionError(f"{name}: equity_sol must stay positive")
 
     if name == "healthy":
         if summary["partial_evidence_flag"]:
