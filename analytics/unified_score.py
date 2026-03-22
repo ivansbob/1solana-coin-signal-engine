@@ -70,6 +70,33 @@ def _resolve_scored_at(token_ctx: Mapping[str, Any], explicit_scored_at: str | N
     return utc_now_iso()
 
 
+def _discovery_lag_penalty(token_ctx: Mapping[str, Any], settings: Any) -> dict[str, Any]:
+    raw_penalty = token_ctx.get("discovery_lag_score_penalty")
+    try:
+        penalty = max(float(raw_penalty or 0.0), 0.0)
+    except (TypeError, ValueError):
+        penalty = 0.0
+
+    applied = bool(token_ctx.get("discovery_lag_penalty_applied")) or penalty > 0
+    blocked_trend = bool(token_ctx.get("discovery_lag_blocked_trend"))
+    size_multiplier = token_ctx.get("discovery_lag_size_multiplier")
+
+    flags: list[str] = []
+    if applied:
+        flags.append("discovery_lag_penalty")
+    if blocked_trend:
+        flags.append("discovery_lag_blocked_trend")
+
+    return {
+        "penalty": penalty,
+        "flags": flags,
+        "warnings": [],
+        "discovery_lag_penalty_applied": applied,
+        "discovery_lag_blocked_trend": blocked_trend,
+        "discovery_lag_size_multiplier": size_multiplier,
+    }
+
+
 def score_token(
     token_ctx: dict,
     settings: Any,

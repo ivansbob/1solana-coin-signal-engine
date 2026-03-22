@@ -68,17 +68,33 @@ def _apply_exit_adjustments(trade: dict, params: dict) -> dict:
     return adjusted
 
 
+def _position_weight(trade: dict) -> float:
+    for field in ("effective_position_pct", "recommended_position_pct"):
+        raw = trade.get(field)
+        if raw in (None, ""):
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value >= 0:
+            return value
+    return 1.0
+
+
 def compute_metrics(trades: list[dict]) -> dict:
     if not trades:
         return {
             "trades": 0,
             "winrate": 0.0,
             "expectancy": 0.0,
+            "size_weighted_expectancy": 0.0,
             "median_pnl_pct": 0.0,
             "max_drawdown_est": 0.0,
         }
 
     pnls = [float(trade.get("pnl_pct", 0.0)) for trade in trades]
+    weights = [_position_weight(trade) for trade in trades]
     wins = sum(1 for pnl in pnls if pnl > 0)
     equity = 0.0
     peak = 0.0
@@ -88,10 +104,16 @@ def compute_metrics(trades: list[dict]) -> dict:
         peak = max(peak, equity)
         max_dd = max(max_dd, peak - equity)
 
+    total_weight = sum(weights)
+    size_weighted_expectancy = 0.0
+    if total_weight > 0:
+        size_weighted_expectancy = sum(pnl * weight for pnl, weight in zip(pnls, weights, strict=False)) / total_weight
+
     return {
         "trades": len(trades),
         "winrate": wins / len(trades),
         "expectancy": sum(pnls) / len(pnls),
+        "size_weighted_expectancy": size_weighted_expectancy,
         "median_pnl_pct": statistics.median(pnls),
         "max_drawdown_est": max_dd,
     }
