@@ -24,8 +24,9 @@ REQUIRED_SMOKE_OUTPUTS: dict[str, tuple[str, ...]] = {
         "runtime_health/runtime_health_smoke.json",
     ),
     "historical_replay_smoke": (
-        "historical_replay/replay_summary.json",
-        "historical_replay/manifest.json",
+        "historical_replay/historical_replay_smoke/replay_summary.json",
+        "historical_replay/historical_replay_smoke/manifest.json",
+        "historical_replay/historical_replay_summary.json",
     ),
     "e2e_golden_smoke": (
         "e2e_golden/manifest.json",
@@ -74,6 +75,13 @@ PYTEST_BLOCKS: tuple[GateBlock, ...] = (
         'tests/test_contract_parity.py',
         'tests/test_signal_trade_schema_provenance.py',
         'tests/test_trade_feature_matrix_schema.py',
+    ),
+    _pytest_block(
+        'historical_replay_sanity',
+        'Historical replay economic sanity, fallback semantics, and required replay artifact fields.',
+        'tests/test_historical_replay_harness.py',
+        'tests/test_replay_outputs.py',
+        'tests/test_replay_harness_fallback.py',
     ),
     _pytest_block(
         'continuation_false_positive_safety',
