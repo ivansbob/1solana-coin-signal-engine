@@ -1,0 +1,308 @@
+diff --git a/tests/test_exit_rules.py b/tests/test_exit_rules.py
+index 88d86eb..4df668d 100644
+--- a/tests/test_exit_rules.py
++++ b/tests/test_exit_rules.py
+@@ -3,7 +3,7 @@ from pathlib import Path
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ 
+-from trading.exit_rules import _pessimistic_stop_threshold, evaluate_hard_exit, evaluate_scalp_exit, evaluate_trend_exit
++from trading.exit_rules import _exit_market_ctx, _pessimistic_stop_threshold, evaluate_hard_exit, evaluate_scalp_exit, evaluate_trend_exit
+ 
+ 
+ class DummySettings:
+@@ -44,6 +44,7 @@ class DummySettings:
+     PAPER_PARTIAL_FILL_MIN_RATIO = 0.5
+     PAPER_SOL_USD_FALLBACK = 100.0
+     EXIT_TREND_POST_PARTIAL1_STOP_PCT = 0.0
++    EXIT_DEGRADED_LIQUIDITY_FALLBACK_MULTIPLIER = 0.1
+ 
+ 
+ def test_hard_exit_rug_takes_precedence():
+@@ -364,3 +365,11 @@ def test_pessimistic_stop_threshold_with_large_slippage_stays_non_positive():
+     threshold = _pessimistic_stop_threshold(-10.0, 15.0)
+     assert threshold < -10.0
+     assert threshold <= 0.0
++
++def test_exit_market_ctx_degrades_entry_liquidity_when_current_liquidity_missing():
++    market_ctx = _exit_market_ctx(
++        {"entry_snapshot": {"liquidity_usd": 50_000, "sol_usd": 100.0}},
++        {"price_usd_now": 1.0},
++        DummySettings(),
++    )
++    assert market_ctx["liquidity_usd"] == 5_000
+diff --git a/tests/test_fill_model.py b/tests/test_fill_model.py
+index 1e9bdf6..b2ce239 100644
+--- a/tests/test_fill_model.py
++++ b/tests/test_fill_model.py
+@@ -11,12 +11,14 @@ class S:
+     PAPER_MAX_SLIPPAGE_BPS = 1200
+     PAPER_SLIPPAGE_LIQUIDITY_SENSITIVITY = 1.0
+     PAPER_PRIORITY_FEE_BASE_SOL = 0.00002
++    PAPER_PRIORITY_FEE_SPIKE_MULTIPLIER = 1.75
+     PAPER_FAILED_TX_BASE_PROB = 0.0
+     PAPER_FAILED_TX_LOW_LIQUIDITY_ADDON = 0.0
+     PAPER_FAILED_TX_HIGH_VOLATILITY_ADDON = 0.0
+     PAPER_PARTIAL_FILL_ALLOWED = True
+     PAPER_PARTIAL_FILL_MIN_RATIO = 0.5
+     PAPER_SOL_USD_FALLBACK = 100.0
++    PAPER_MAX_POOL_PARTICIPATION_PCT = 0.03
+     EXIT_SCALP_STOP_LOSS_PCT = -10
+     EXIT_TREND_HARD_STOP_PCT = -18
+ 
+@@ -77,3 +79,41 @@ def test_simulate_exit_fill_failclosed_uses_pessimistic_execution_not_fake_break
+     assert fill["execution_assumption"] == "failclosed_pessimistic_price"
+     assert fill["degraded_execution_path"] is True
+     assert fill["executed_price_usd"] < 100.0
++
++def test_simulate_entry_fill_caps_requested_size_by_pool_liquidity_participation():
++    fill = simulate_entry_fill(
++        {"token_address": "SoCap", "recommended_position_pct": 1.0, "entry_confidence": 1.0},
++        {"price_usd": 1.0, "liquidity_usd": 1_000.0, "volatility": 0.1, "sol_usd": 100.0},
++        {"free_capital_sol": 10.0},
++        S(),
++    )
++    assert fill["requested_notional_sol"] <= 0.3 + 1e-9
++    assert fill["requested_notional_sol"] < 10.0
++
++
++def test_simulate_exit_fill_applies_sol_usd_correction_to_proceeds():
++    stronger_sol = simulate_exit_fill(
++        {
++            "position_id": "pos_0003",
++            "remaining_size_sol": 1.0,
++            "entry_price_usd": 100.0,
++            "entry_snapshot": {"sol_usd": 100.0},
++        },
++        {"exit_decision": "FULL_EXIT", "exit_fraction": 1.0, "signal_quality": 1.0},
++        {"price_usd": 150.0, "liquidity_usd": 1_000_000, "volatility": 0.1, "sol_usd": 200.0},
++        S(),
++    )
++    weaker_sol = simulate_exit_fill(
++        {
++            "position_id": "pos_0004",
++            "remaining_size_sol": 1.0,
++            "entry_price_usd": 100.0,
++            "entry_snapshot": {"sol_usd": 100.0},
++        },
++        {"exit_decision": "FULL_EXIT", "exit_fraction": 1.0, "signal_quality": 1.0},
++        {"price_usd": 150.0, "liquidity_usd": 1_000_000, "volatility": 0.1, "sol_usd": 100.0},
++        S(),
++    )
++    assert stronger_sol["tx_failed"] is False
++    assert weaker_sol["tx_failed"] is False
++    assert stronger_sol["filled_notional_sol"] < weaker_sol["filled_notional_sol"]
+diff --git a/tests/test_friction_model.py b/tests/test_friction_model.py
+index a6456c4..5800e04 100644
+--- a/tests/test_friction_model.py
++++ b/tests/test_friction_model.py
+@@ -17,6 +17,7 @@ class S:
+     PAPER_MAX_SLIPPAGE_BPS = 1200
+     PAPER_SLIPPAGE_LIQUIDITY_SENSITIVITY = 1.0
+     PAPER_PRIORITY_FEE_BASE_SOL = 0.00002
++    PAPER_PRIORITY_FEE_SPIKE_MULTIPLIER = 1.75
+     PAPER_FAILED_TX_BASE_PROB = 0.03
+     PAPER_FAILED_TX_LOW_LIQUIDITY_ADDON = 0.05
+     PAPER_FAILED_TX_HIGH_VOLATILITY_ADDON = 0.04
+@@ -95,3 +96,27 @@ def test_full_exit_with_cluster_dump_is_harsher_than_normal_exit():
+         S(),
+     )
+     assert stressed["effective_slippage_bps"] > normal["effective_slippage_bps"]
++
++def test_priority_fee_spike_multiplier_raises_fee_under_stress():
++    base_fee = compute_priority_fee_sol({}, {}, S())
++    stressed_fee = compute_priority_fee_sol(
++        {"exit_decision": "FULL_EXIT", "exit_flags": ["cluster_dump_detected"]},
++        {"congestion_multiplier": 1.8, "priority_fee_avg_first_min": 0.00003, "sell_pressure": 0.95},
++        S(),
++    )
++    assert stressed_fee > base_fee
++    assert stressed_fee > S.PAPER_PRIORITY_FEE_BASE_SOL * 1.8
++
++
++def test_partial_fill_realism_impacts_executed_size_not_full_requested_size():
++    class LinearS(S):
++        FRICTION_MODEL_MODE = "linear"
++        PAPER_DEFAULT_SLIPPAGE_BPS = 0
++
++    result = compute_fill_realism(
++        {"requested_notional_sol": 4.0},
++        {"liquidity_usd": 1_000.0, "volatility": 0.0, "sol_usd": 100.0},
++        LinearS(),
++    )
++    expected = (4.0 * 100.0 * result["filled_fraction"] / result["effective_liquidity_usd"]) * 10_000
++    assert abs(result["estimated_price_impact_bps"] - expected) < 1e-6
+diff --git a/tests/test_position_book.py b/tests/test_position_book.py
+index 39c9f1a..17f2c2b 100644
+--- a/tests/test_position_book.py
++++ b/tests/test_position_book.py
+@@ -140,3 +140,21 @@ def test_release_pending_settlements_is_idempotent():
+     assert second_release["released_count"] == 0
+     assert state["portfolio"]["free_capital_sol"] == free_capital_after_first
+     assert state["portfolio"]["pending_settlement_count"] == 0
++
++def test_partial_exit_handles_negative_realized_pnl_when_sol_strengthens():
++    state = {}
++    ensure_state(state, S())
++    pos = open_position(
++        {"executed_price_usd": 1.0, "filled_notional_sol": 10.0, "filled_cost_basis_sol": 10.0, "priority_fee_sol": 0.0, "fill_ratio": 1.0},
++        {"token_address": "SoLoss", "symbol": "LOSS", "entry_decision": "SCALP", "entry_snapshot": {}, "contract_version": "paper_trader_v1"},
++        state,
++    )
++
++    apply_partial_exit(
++        pos,
++        {"filled_notional_sol": 1.5, "requested_notional_sol": 2.0, "filled_cost_basis_sol": 2.0, "executed_price_usd": 0.9, "priority_fee_sol": 0.0, "exit_reason": "stress_exit"},
++        state,
++    )
++
++    assert pos["remaining_size_sol"] == 8.0
++    assert pos["realized_pnl_sol"] < 0.0
+diff --git a/trading/exit_rules.py b/trading/exit_rules.py
+index 90044d6..328b4e9 100644
+--- a/trading/exit_rules.py
++++ b/trading/exit_rules.py
+@@ -107,11 +107,18 @@ def _is_sell_heavy_composition(value: Any) -> bool:
+     return composition in _SELL_HEAVY_COMPOSITIONS
+ 
+ 
+-def _exit_market_ctx(position_ctx: dict[str, Any], current_ctx: dict[str, Any]) -> dict[str, Any]:
++def _exit_market_ctx(position_ctx: dict[str, Any], current_ctx: dict[str, Any], settings: Any) -> dict[str, Any]:
+     entry_snapshot = dict(position_ctx.get("entry_snapshot") or {})
++    current_liquidity = current_ctx.get("liquidity_usd_now", current_ctx.get("liquidity_usd"))
++    if current_liquidity is None:
++        entry_liquidity = _to_float(entry_snapshot.get("liquidity_usd"), default=0.0)
++        degraded_multiplier = max(_to_float(_setting(settings, "EXIT_DEGRADED_LIQUIDITY_FALLBACK_MULTIPLIER", 0.1), default=0.1), 0.0)
++        liquidity_usd = entry_liquidity * degraded_multiplier if entry_liquidity > 0 else None
++    else:
++        liquidity_usd = current_liquidity
+     return {
+         "price_usd": current_ctx.get("price_usd_now", current_ctx.get("price_usd")),
+-        "liquidity_usd": current_ctx.get("liquidity_usd_now", current_ctx.get("liquidity_usd", entry_snapshot.get("liquidity_usd"))),
++        "liquidity_usd": liquidity_usd,
+         "volatility": current_ctx.get("volatility", current_ctx.get("volume_velocity_now", current_ctx.get("volume_velocity", entry_snapshot.get("volume_velocity")))),
+         "volume_velocity": current_ctx.get("volume_velocity_now", current_ctx.get("volume_velocity", entry_snapshot.get("volume_velocity"))),
+         "sol_usd": current_ctx.get("sol_usd", entry_snapshot.get("sol_usd")),
+@@ -124,7 +131,7 @@ def _expected_exit_slippage_pct(position_ctx: dict[str, Any], current_ctx: dict[
+         "reference_price_usd": _to_float(current_ctx.get("price_usd_now", current_ctx.get("price_usd"))),
+         "exit_decision": "FULL_EXIT",
+     }
+-    market_ctx = _exit_market_ctx(position_ctx, current_ctx)
++    market_ctx = _exit_market_ctx(position_ctx, current_ctx, settings)
+     slippage_bps = compute_slippage_bps(order_ctx, market_ctx, settings)
+     return max(slippage_bps, 0.0) / 100.0
+ 
+diff --git a/trading/fill_model.py b/trading/fill_model.py
+index 58ba21d..900da41 100644
+--- a/trading/fill_model.py
++++ b/trading/fill_model.py
+@@ -6,6 +6,7 @@ import hashlib
+ from typing import Any
+ 
+ from trading.friction_model import (
++    _resolve_sol_usd,
+     compute_failed_tx_probability,
+     compute_fill_realism,
+     compute_partial_fill_ratio,
+@@ -69,6 +70,15 @@ def _effective_entry_position_pct(signal_ctx: dict[str, Any]) -> float:
+     return 0.0
+ 
+ 
++def _entry_liquidity_cap_sol(market_ctx: dict[str, Any], settings: Any) -> float:
++    liquidity_usd = max(float(market_ctx.get("liquidity_usd") or market_ctx.get("liquidity") or 0.0), 0.0)
++    sol_usd = _resolve_sol_usd(market_ctx, settings)
++    max_pool_participation = max(float(getattr(settings, "PAPER_MAX_POOL_PARTICIPATION_PCT", 0.03) or 0.03), 0.0)
++    if liquidity_usd <= 0 or sol_usd <= 0 or max_pool_participation <= 0:
++        return 0.0
++    return max(liquidity_usd * max_pool_participation / sol_usd, 0.0)
++
++
+ def _is_failclosed_exit(exit_ctx: dict[str, Any]) -> bool:
+     warnings = {str(item) for item in (exit_ctx.get("exit_warnings") or [])}
+     flags = {str(item) for item in (exit_ctx.get("exit_flags") or [])}
+@@ -91,9 +101,14 @@ def _failclosed_reference_price(position_ctx: dict[str, Any], settings: Any) ->
+ 
+ def simulate_entry_fill(signal_ctx: dict[str, Any], market_ctx: dict[str, Any], portfolio_ctx: dict[str, Any], settings: Any) -> dict[str, Any]:
+     free_capital = float(portfolio_ctx.get("free_capital_sol") or 0.0)
++    requested_by_portfolio = max(
++        0.0,
++        free_capital * _effective_entry_position_pct(signal_ctx),
++    )
++    max_allowed_sol_by_liquidity = _entry_liquidity_cap_sol(market_ctx, settings)
+     requested = max(
+         0.0,
+-        min(free_capital * _effective_entry_position_pct(signal_ctx), free_capital),
++        min(requested_by_portfolio, max_allowed_sol_by_liquidity, free_capital),
+     )
+     reference_price = float(market_ctx.get("price_usd") or signal_ctx.get("entry_snapshot", {}).get("price_usd") or 0.0)
+     order_ctx = {
+@@ -110,7 +125,7 @@ def simulate_entry_fill(signal_ctx: dict[str, Any], market_ctx: dict[str, Any],
+     if draw < fail_prob or requested <= 0:
+         return _build_result(requested, 0.0, reference_price, 0.0, slippage_bps, priority_fee_sol, True, "simulated_low_liquidity_failure", realism=realism)
+ 
+-    partial_ratio = compute_partial_fill_ratio(order_ctx, market_ctx, settings)
++    partial_ratio = compute_partial_fill_ratio(order_ctx, {**market_ctx, "effective_liquidity_usd": realism.get("effective_liquidity_usd")}, settings)
+     filled = requested * partial_ratio
+     exec_price = reference_price * (1 + slippage_bps / 10_000)
+     return _build_result(
+@@ -173,7 +188,11 @@ def simulate_exit_fill(position_ctx: dict[str, Any], exit_ctx: dict[str, Any], m
+     exec_price = reference_price * (1 - slippage_bps / 10_000)
+     entry_price = float(position_ctx.get("entry_price_usd") or reference_price or 0.0)
+     price_ratio = 0.0 if entry_price <= 0 else max(exec_price, 0.0) / entry_price
+-    proceeds_sol = filled_cost_basis * price_ratio
++    entry_snapshot = dict(position_ctx.get("entry_snapshot") or {})
++    entry_sol_usd = _resolve_sol_usd(entry_snapshot, settings)
++    current_sol_usd = _resolve_sol_usd(market_ctx, settings)
++    sol_correction_ratio = 1.0 if current_sol_usd <= 0 else entry_sol_usd / current_sol_usd
++    proceeds_sol = filled_cost_basis * price_ratio * sol_correction_ratio
+     return _build_result(
+         requested,
+         proceeds_sol,
+diff --git a/trading/friction_model.py b/trading/friction_model.py
+index 3fda242..097abd2 100644
+--- a/trading/friction_model.py
++++ b/trading/friction_model.py
+@@ -132,7 +132,9 @@ def compute_fill_realism(order_ctx: dict[str, Any], market_ctx: dict[str, Any],
+     volatility = max(_safe_float(market_ctx.get("volatility") or market_ctx.get("volume_velocity"), 0.0), 0.0)
+     requested_sol = max(_safe_float(order_ctx.get("requested_notional_sol"), 0.0), 0.0)
+     requested_usd = requested_sol * _resolve_sol_usd(market_ctx, settings)
+-    participation = max(requested_usd / effective_liquidity_usd, 0.0)
++    filled_fraction = compute_partial_fill_ratio(order_ctx, enriched_market_ctx, settings)
++    actual_executed_usd = requested_usd * filled_fraction
++    participation = max(actual_executed_usd / effective_liquidity_usd, 0.0)
+ 
+     liquidity_sensitivity = _safe_float(getattr(settings, "PAPER_SLIPPAGE_LIQUIDITY_SENSITIVITY", 1.0), 1.0)
+     default_slippage_bps = _safe_float(getattr(settings, "PAPER_DEFAULT_SLIPPAGE_BPS", 150.0), 150.0)
+@@ -207,7 +209,7 @@ def compute_fill_realism(order_ctx: dict[str, Any], market_ctx: dict[str, Any],
+         "effective_liquidity_usd": round(effective_liquidity_usd, 6),
+         "thin_depth_penalty_multiplier": thin_depth_penalty_multiplier,
+         "fill_status": fill_status,
+-        "filled_fraction": round(compute_partial_fill_ratio(order_ctx, enriched_market_ctx, settings), 6),
++        "filled_fraction": round(filled_fraction, 6),
+         "execution_warning": execution_warning,
+     }
+ 
+@@ -217,11 +219,18 @@ def compute_slippage_bps(order_ctx: dict[str, Any], market_ctx: dict[str, Any],
+ 
+ 
+ def compute_priority_fee_sol(order_ctx: dict[str, Any], market_ctx: dict[str, Any], settings: Any) -> float:
+-    congestion = float(market_ctx.get("congestion_multiplier") or 1.0)
+-    if market_ctx.get("priority_fee_avg_first_min"):
+-        congestion = max(congestion, float(market_ctx["priority_fee_avg_first_min"]))
+-    congestion = max(congestion, _congestion_stress_multiplier(order_ctx, market_ctx, settings))
+-    return max(float(getattr(settings, "PAPER_PRIORITY_FEE_BASE_SOL", 0.00002)) * max(congestion, 1.0), 0.0)
++    base_fee = max(_safe_float(getattr(settings, "PAPER_PRIORITY_FEE_BASE_SOL", 0.00002), 0.00002), 0.0)
++    congestion = max(_safe_float(market_ctx.get("congestion_multiplier"), 1.0), 1.0)
++    observed_priority_fee = max(_safe_float(market_ctx.get("priority_fee_avg_first_min"), 0.0), 0.0)
++    stress_multiplier = max(_congestion_stress_multiplier(order_ctx, market_ctx, settings), 1.0)
++    spike_multiplier = max(_safe_float(getattr(settings, "PAPER_PRIORITY_FEE_SPIKE_MULTIPLIER", 1.75), 1.75), 1.0)
++
++    fee = max(base_fee * congestion, observed_priority_fee)
++    stress_source = max(congestion, stress_multiplier)
++    if stress_source > 1.0:
++        fee *= 1.0 + (stress_source - 1.0) * max(spike_multiplier - 1.0, 0.0)
++
++    return max(fee, 0.0)
+ 
+ 
+ def compute_failed_tx_probability(order_ctx: dict[str, Any], market_ctx: dict[str, Any], settings: Any) -> float:

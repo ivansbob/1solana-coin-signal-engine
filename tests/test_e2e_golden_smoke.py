@@ -27,6 +27,11 @@ def test_e2e_golden_smoke_script_runs_and_reports_all_scenarios(tmp_path):
 
     assert summary["healthy"]["runtime_signal_origin"] == "historical_replay_jsonl"
     assert summary["healthy"]["replay_data_status"] == "historical"
+    assert summary["healthy"]["gross_pnl_pct"] is not None
+    assert summary["healthy"]["net_pnl_pct"] > 0
+    assert summary["healthy"]["net_pnl_pct"] < summary["healthy"]["gross_pnl_pct"]
+    assert summary["healthy"]["equity_sol"] > 1.0
+    assert summary["healthy"]["economic_sanity_status"] == "ok"
     assert summary["partial"]["partial_evidence_flag"] is True
     assert summary["partial"]["replay_data_status"] == "historical_partial"
     assert summary["stale"]["stale_provenance_visible"] is True
@@ -37,6 +42,8 @@ def test_e2e_golden_smoke_script_runs_and_reports_all_scenarios(tmp_path):
     assert summary["partial"]["analyzer_matrix_path"].endswith("trade_feature_matrix.jsonl")
 
     for name in summary:
+        assert summary[name]["economic_sanity_status"] == "ok"
+        assert summary[name]["equity_sol"] > 0
         for key in (
             "signals_path",
             "trades_path",
