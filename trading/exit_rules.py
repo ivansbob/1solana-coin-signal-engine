@@ -107,11 +107,18 @@ def _is_sell_heavy_composition(value: Any) -> bool:
     return composition in _SELL_HEAVY_COMPOSITIONS
 
 
-def _exit_market_ctx(position_ctx: dict[str, Any], current_ctx: dict[str, Any]) -> dict[str, Any]:
+def _exit_market_ctx(position_ctx: dict[str, Any], current_ctx: dict[str, Any], settings: Any) -> dict[str, Any]:
     entry_snapshot = dict(position_ctx.get("entry_snapshot") or {})
+    current_liquidity = current_ctx.get("liquidity_usd_now", current_ctx.get("liquidity_usd"))
+    if current_liquidity is None:
+        entry_liquidity = _to_float(entry_snapshot.get("liquidity_usd"), default=0.0)
+        degraded_multiplier = max(_to_float(_setting(settings, "EXIT_DEGRADED_LIQUIDITY_FALLBACK_MULTIPLIER", 0.1), default=0.1), 0.0)
+        liquidity_usd = entry_liquidity * degraded_multiplier if entry_liquidity > 0 else None
+    else:
+        liquidity_usd = current_liquidity
     return {
         "price_usd": current_ctx.get("price_usd_now", current_ctx.get("price_usd")),
-        "liquidity_usd": current_ctx.get("liquidity_usd_now", current_ctx.get("liquidity_usd", entry_snapshot.get("liquidity_usd"))),
+        "liquidity_usd": liquidity_usd,
         "volatility": current_ctx.get("volatility", current_ctx.get("volume_velocity_now", current_ctx.get("volume_velocity", entry_snapshot.get("volume_velocity")))),
         "volume_velocity": current_ctx.get("volume_velocity_now", current_ctx.get("volume_velocity", entry_snapshot.get("volume_velocity"))),
         "sol_usd": current_ctx.get("sol_usd", entry_snapshot.get("sol_usd")),
@@ -124,7 +131,7 @@ def _expected_exit_slippage_pct(position_ctx: dict[str, Any], current_ctx: dict[
         "reference_price_usd": _to_float(current_ctx.get("price_usd_now", current_ctx.get("price_usd"))),
         "exit_decision": "FULL_EXIT",
     }
-    market_ctx = _exit_market_ctx(position_ctx, current_ctx)
+    market_ctx = _exit_market_ctx(position_ctx, current_ctx, settings)
     slippage_bps = compute_slippage_bps(order_ctx, market_ctx, settings)
     return max(slippage_bps, 0.0) / 100.0
 
