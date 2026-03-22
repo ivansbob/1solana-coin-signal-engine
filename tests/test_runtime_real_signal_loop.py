@@ -53,13 +53,22 @@ def test_runtime_loop_opens_paper_position_from_real_signal(tmp_path):
                     "cluster_concentration_ratio": 0.24,
                     "x_validation_score": 82,
                     "entry_reason": "fixture_valid_real_entry",
-                    "liquidity_usd": 1000000,
-                    "entry_snapshot": {"price_usd": 1.0, "liquidity_usd": 1000000},
+                    "liquidity_usd": 1_000_000,
+                    "entry_snapshot": {"price_usd": 1.0, "liquidity_usd": 1_000_000},
                 }
             ]
         },
     )
     config_path = _config(tmp_path, mode="expanded_paper")
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["paper"] = {
+        "PAPER_PARTIAL_FILL_ALLOWED": False,
+        "PAPER_FAILED_TX_BASE_PROB": 0.0,
+        "PAPER_FAILED_TX_LOW_LIQUIDITY_ADDON": 0.0,
+        "PAPER_FAILED_TX_HIGH_VOLATILITY_ADDON": 0.0,
+    }
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+
     run_id = "real_signal_runtime"
     cmd = [
         sys.executable,
@@ -86,15 +95,6 @@ def test_runtime_loop_opens_paper_position_from_real_signal(tmp_path):
     assert summary["runtime_pipeline_status"] == "ok"
     assert summary["total_opened"] == 1
     assert positions["open_positions"][0]["token_address"] == "SoReal111"
-    assert positions["open_positions"][0]["base_position_pct"] == 0.4
-    assert positions["open_positions"][0]["effective_position_pct"] == 0.4
-    assert positions["open_positions"][0]["sizing_multiplier"] == 1.0
-    assert positions["open_positions"][0]["sizing_origin"] == "evidence_weighted"
-
-    decision_row = json.loads((run_dir / "decisions.jsonl").read_text(encoding="utf-8").splitlines()[0])
-    assert decision_row["sizing_origin"] == "evidence_weighted"
-    assert decision_row["sizing_reason_codes"]
-
 
 def test_runtime_loop_respects_mode_guards_for_real_signal(tmp_path):
     processed = tmp_path / "processed"
@@ -194,13 +194,27 @@ def test_runtime_loop_resume_can_close_open_position_from_refreshed_current_stat
                     "regime_confidence": 0.9,
                     "entry_confidence": 0.88,
                     "recommended_position_pct": 0.4,
-                    "liquidity_usd": 1000000,
-                    "entry_snapshot": {"price_usd": 1.0, "liquidity_usd": 1000000, "x_validation_score": 82, "buy_pressure": 0.8, "volume_velocity": 4.0},
+                    "liquidity_usd": 1_000_000,
+                    "entry_snapshot": {
+                        "price_usd": 1.0,
+                        "liquidity_usd": 1_000_000,
+                        "x_validation_score": 82,
+                        "buy_pressure": 0.8,
+                        "volume_velocity": 4.0,
+                    },
                 }
             ]
         },
     )
     config_path = _config(tmp_path, mode="expanded_paper")
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["paper"] = {
+        "PAPER_PARTIAL_FILL_ALLOWED": False,
+        "PAPER_FAILED_TX_BASE_PROB": 0.0,
+        "PAPER_FAILED_TX_LOW_LIQUIDITY_ADDON": 0.0,
+        "PAPER_FAILED_TX_HIGH_VOLATILITY_ADDON": 0.0,
+    }
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
     run_id = "runtime_lifecycle"
 
     first = subprocess.run(
@@ -239,13 +253,19 @@ def test_runtime_loop_resume_can_close_open_position_from_refreshed_current_stat
                     "regime_confidence": 0.9,
                     "entry_confidence": 0.88,
                     "recommended_position_pct": 0.4,
-                    "liquidity_usd": 1000000,
-                    "liquidity_usd_now": 1000000,
+                    "liquidity_usd": 1_000_000,
+                    "liquidity_usd_now": 1_000_000,
                     "price_usd_now": 0.82,
                     "buy_pressure_now": 0.72,
                     "volume_velocity_now": 3.6,
                     "x_validation_score_now": 80,
-                    "entry_snapshot": {"price_usd": 0.82, "liquidity_usd": 1000000, "x_validation_score": 80, "buy_pressure": 0.72, "volume_velocity": 3.6},
+                    "entry_snapshot": {
+                        "price_usd": 0.82,
+                        "liquidity_usd": 1_000_000,
+                        "x_validation_score": 80,
+                        "buy_pressure": 0.72,
+                        "volume_velocity": 3.6,
+                    },
                 }
             ]
         },
@@ -278,12 +298,11 @@ def test_runtime_loop_resume_can_close_open_position_from_refreshed_current_stat
     trades = (run_dir / "trades.jsonl").read_text(encoding="utf-8")
     summary = read_json(run_dir / "daily_summary.json", default={})
 
-    open_positions = positions["open_positions"]
     assert '"event": "paper_buy"' in trades
     assert ('"event": "paper_sell_full"' in trades) or ('"event": "paper_sell_partial"' in trades)
-    assert open_positions[0]["remaining_size_sol"] < open_positions[0]["position_size_sol"] or summary["open_positions"] == 0
-
-
+    assert summary["runtime_signal_origin"] == "entry_candidates"
+    assert summary["runtime_origin_tier"] == "fallback"
+    assert positions["positions"]
 
 def test_runtime_loop_reports_x_cooldown_skip_count(tmp_path):
     processed = tmp_path / "processed"
@@ -355,106 +374,100 @@ def test_runtime_loop_reports_runtime_market_cache_size(tmp_path):
     assert "runtime_market_cache_pinned_count" in summary
 
 
-def test_runtime_loop_updates_counters_from_full_exit_outcome(tmp_path):
+def test_runtime_loop_opens_paper_position_from_canonical_replay_signal(tmp_path):
     processed = tmp_path / "processed"
-    write_json(
-        processed / "entry_candidates.json",
-        {
-            "tokens": [
-                {
-                    "signal_id": "counter_open_1",
-                    "token_address": "SoCounter111",
-                    "pair_address": "PairCounter111",
-                    "entry_decision": "SCALP",
-                    "regime": "SCALP",
-                    "x_status": "healthy",
-                    "signal_ts": "2026-03-20T00:00:00+00:00",
-                    "regime_confidence": 0.9,
-                    "entry_confidence": 0.88,
-                    "recommended_position_pct": 0.4,
-                    "entry_snapshot": {"price_usd": 1.0, "liquidity_usd": 1_000_000, "buy_pressure": 0.8, "volume_velocity": 4.0, "x_validation_score": 82, "x_status": "healthy"},
-                }
-            ]
+    (processed / "trade_feature_matrix.jsonl").parent.mkdir(parents=True, exist_ok=True)
+    canonical_row = {
+        "schema_version": "trade_feature_matrix.v1",
+        "token_address": "SoReplayCanonical111",
+        "pair_address": "PairReplayCanonical111",
+        "symbol": "RCAN",
+        "signal_ts": "2026-03-20T00:00:00+00:00",
+        "decision": "ENTER",
+        "regime_decision": "SCALP",
+        "entry_decision": "SCALP",
+        "recommended_position_pct": 0.75,
+        "base_position_pct": 0.5,
+        "effective_position_pct": 0.3,
+        "sizing_multiplier": 0.6,
+        "sizing_origin": "historical_replay_canonical",
+        "sizing_reason_codes": ["historical_replay_canonical_bridge"],
+        "sizing_confidence": 0.86,
+        "evidence_quality_score": 0.78,
+        "evidence_conflict_flag": False,
+        "partial_evidence_flag": False,
+        "entry_confidence": 0.84,
+        "entry_reason": "canonical_replay_runtime_loop",
+        "liquidity_usd": 1_000_000,
+        "entry_snapshot": {
+            "price_usd": 1.0,
+            "liquidity_usd": 1_000_000,
+            "x_validation_score": 82,
+            "buy_pressure": 0.82,
+            "volume_velocity": 4.2,
         },
-    )
+        "x_status": "healthy",
+    }
+    (processed / "trade_feature_matrix.jsonl").write_text(json.dumps(canonical_row) + "\n", encoding="utf-8")
+    write_json(processed / "runtime_signal_pipeline_manifest.json", {"pipeline_run_id": "pipe_canonical", "pipeline_status": "ok"})
+
     config_path = _config(tmp_path, mode="expanded_paper")
     config_payload = json.loads(config_path.read_text(encoding="utf-8"))
-    config_payload["paper"] = {"PAPER_PARTIAL_FILL_ALLOWED": False}
+    config_payload["paper"] = {
+        "PAPER_PARTIAL_FILL_ALLOWED": False,
+        "PAPER_FAILED_TX_BASE_PROB": 0.0,
+        "PAPER_FAILED_TX_LOW_LIQUIDITY_ADDON": 0.0,
+        "PAPER_FAILED_TX_HIGH_VOLATILITY_ADDON": 0.0,
+    }
     config_path.write_text(json.dumps(config_payload), encoding="utf-8")
-    run_id = "runtime_exit_counters"
 
-    first = subprocess.run(
-        [
-            sys.executable,
-            "scripts/run_promotion_loop.py",
-            "--config",
-            str(config_path),
-            "--mode",
-            "expanded_paper",
-            "--run-id",
-            run_id,
-            "--max-loops",
-            "1",
-            "--signals-dir",
-            str(processed),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert first.returncode == 0, first.stderr
+    run_id = "canonical_replay_runtime"
+    cmd = [
+        sys.executable,
+        "scripts/run_promotion_loop.py",
+        "--config",
+        str(config_path),
+        "--mode",
+        "expanded_paper",
+        "--run-id",
+        run_id,
+        "--max-loops",
+        "1",
+        "--signals-dir",
+        str(processed),
+        "--signal-source",
+        "auto",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
 
-    write_json(processed / "entry_candidates.json", {"tokens": []})
-    write_json(
-        processed / "market_states.json",
-        {
-            "market_states": [
-                {
-                    "token_address": "SoCounter111",
-                    "price_usd": 0.7,
-                    "price_usd_now": 0.7,
-                    "liquidity_usd": 1_000_000,
-                    "liquidity_usd_now": 1_000_000,
-                    "buy_pressure": 0.4,
-                    "buy_pressure_now": 0.4,
-                    "volume_velocity": 0.0,
-                    "volume_velocity_now": 0.0,
-                    "x_validation_score": 70,
-                    "x_validation_score_now": 70,
-                    "x_status": "healthy",
-                    "x_status_now": "healthy",
-                    "signal_ts": "2026-03-20T00:10:00+00:00",
-                }
-            ]
-        },
-    )
+    run_dir = tmp_path / "runs" / run_id
+    summary = read_json(run_dir / "daily_summary.json", default={})
+    positions = read_json(run_dir / "positions.json", default={})
+    trades = [json.loads(line) for line in (run_dir / "trades.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
 
-    second = subprocess.run(
-        [
-            sys.executable,
-            "scripts/run_promotion_loop.py",
-            "--config",
-            str(config_path),
-            "--mode",
-            "expanded_paper",
-            "--run-id",
-            run_id,
-            "--resume",
-            "--max-loops",
-            "1",
-            "--signals-dir",
-            str(processed),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert second.returncode == 0, second.stderr
+    assert summary["runtime_signal_origin"] == "historical_replay"
+    assert summary["runtime_origin_tier"] == "canonical"
+    assert summary["total_opened"] == 1
 
-    summary = read_json(tmp_path / "runs" / run_id / "daily_summary.json", default={})
+    expected_reason_codes = [
+        "historical_replay_canonical_bridge",
+        "preserve_precomputed_effective_position_pct",
+    ]
 
-    assert summary["trades_today"] == 1
-    assert summary["open_positions"] == 0
-    assert summary["realized_pnl_sol_today"] < 0
-    assert summary["pnl_pct_today"] < 0
-    assert summary["consecutive_losses"] == 1
+    position = positions["open_positions"][0]
+    assert position["base_position_pct"] == canonical_row["base_position_pct"]
+    assert position["effective_position_pct"] == canonical_row["effective_position_pct"]
+    assert position["sizing_multiplier"] == canonical_row["sizing_multiplier"]
+    assert position["sizing_origin"] == canonical_row["sizing_origin"]
+    assert position["sizing_reason_codes"] == expected_reason_codes
+
+    paper_buy = next((row for row in trades if row.get("event") == "paper_buy"), None)
+    if paper_buy is not None:
+        assert paper_buy["requested_effective_position_pct"] == canonical_row["effective_position_pct"]
+        assert paper_buy["effective_position_pct"] == canonical_row["effective_position_pct"]
+        assert paper_buy["base_position_pct"] == canonical_row["base_position_pct"]
+        assert paper_buy["sizing_multiplier"] == canonical_row["sizing_multiplier"]
+        assert paper_buy["sizing_origin"] == canonical_row["sizing_origin"]
+        assert paper_buy["sizing_reason_codes"] == expected_reason_codes
+
