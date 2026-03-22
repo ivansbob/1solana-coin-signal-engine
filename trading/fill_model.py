@@ -6,6 +6,7 @@ import hashlib
 from typing import Any
 
 from trading.friction_model import (
+    _resolve_sol_usd,
     compute_failed_tx_probability,
     compute_fill_realism,
     compute_partial_fill_ratio,
@@ -69,6 +70,15 @@ def _effective_entry_position_pct(signal_ctx: dict[str, Any]) -> float:
     return 0.0
 
 
+def _entry_liquidity_cap_sol(market_ctx: dict[str, Any], settings: Any) -> float:
+    liquidity_usd = max(float(market_ctx.get("liquidity_usd") or market_ctx.get("liquidity") or 0.0), 0.0)
+    sol_usd = _resolve_sol_usd(market_ctx, settings)
+    max_pool_participation = max(float(getattr(settings, "PAPER_MAX_POOL_PARTICIPATION_PCT", 0.03) or 0.03), 0.0)
+    if liquidity_usd <= 0 or sol_usd <= 0 or max_pool_participation <= 0:
+        return 0.0
+    return max(liquidity_usd * max_pool_participation / sol_usd, 0.0)
+
+
 def _is_failclosed_exit(exit_ctx: dict[str, Any]) -> bool:
     warnings = {str(item) for item in (exit_ctx.get("exit_warnings") or [])}
     flags = {str(item) for item in (exit_ctx.get("exit_flags") or [])}
@@ -91,9 +101,14 @@ def _failclosed_reference_price(position_ctx: dict[str, Any], settings: Any) -> 
 
 def simulate_entry_fill(signal_ctx: dict[str, Any], market_ctx: dict[str, Any], portfolio_ctx: dict[str, Any], settings: Any) -> dict[str, Any]:
     free_capital = float(portfolio_ctx.get("free_capital_sol") or 0.0)
+    requested_by_portfolio = max(
+        0.0,
+        free_capital * _effective_entry_position_pct(signal_ctx),
+    )
+    max_allowed_sol_by_liquidity = _entry_liquidity_cap_sol(market_ctx, settings)
     requested = max(
         0.0,
-        min(free_capital * _effective_entry_position_pct(signal_ctx), free_capital),
+        min(requested_by_portfolio, max_allowed_sol_by_liquidity, free_capital),
     )
     reference_price = float(market_ctx.get("price_usd") or signal_ctx.get("entry_snapshot", {}).get("price_usd") or 0.0)
     order_ctx = {
@@ -110,7 +125,7 @@ def simulate_entry_fill(signal_ctx: dict[str, Any], market_ctx: dict[str, Any], 
     if draw < fail_prob or requested <= 0:
         return _build_result(requested, 0.0, reference_price, 0.0, slippage_bps, priority_fee_sol, True, "simulated_low_liquidity_failure", realism=realism)
 
-    partial_ratio = compute_partial_fill_ratio(order_ctx, market_ctx, settings)
+    partial_ratio = compute_partial_fill_ratio(order_ctx, {**market_ctx, "effective_liquidity_usd": realism.get("effective_liquidity_usd")}, settings)
     filled = requested * partial_ratio
     exec_price = reference_price * (1 + slippage_bps / 10_000)
     return _build_result(
@@ -173,7 +188,11 @@ def simulate_exit_fill(position_ctx: dict[str, Any], exit_ctx: dict[str, Any], m
     exec_price = reference_price * (1 - slippage_bps / 10_000)
     entry_price = float(position_ctx.get("entry_price_usd") or reference_price or 0.0)
     price_ratio = 0.0 if entry_price <= 0 else max(exec_price, 0.0) / entry_price
-    proceeds_sol = filled_cost_basis * price_ratio
+    entry_snapshot = dict(position_ctx.get("entry_snapshot") or {})
+    entry_sol_usd = _resolve_sol_usd(entry_snapshot, settings)
+    current_sol_usd = _resolve_sol_usd(market_ctx, settings)
+    sol_correction_ratio = 1.0 if current_sol_usd <= 0 else entry_sol_usd / current_sol_usd
+    proceeds_sol = filled_cost_basis * price_ratio * sol_correction_ratio
     return _build_result(
         requested,
         proceeds_sol,

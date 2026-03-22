@@ -17,6 +17,7 @@ class S:
     PAPER_MAX_SLIPPAGE_BPS = 1200
     PAPER_SLIPPAGE_LIQUIDITY_SENSITIVITY = 1.0
     PAPER_PRIORITY_FEE_BASE_SOL = 0.00002
+    PAPER_PRIORITY_FEE_SPIKE_MULTIPLIER = 1.75
     PAPER_FAILED_TX_BASE_PROB = 0.03
     PAPER_FAILED_TX_LOW_LIQUIDITY_ADDON = 0.05
     PAPER_FAILED_TX_HIGH_VOLATILITY_ADDON = 0.04
@@ -95,3 +96,27 @@ def test_full_exit_with_cluster_dump_is_harsher_than_normal_exit():
         S(),
     )
     assert stressed["effective_slippage_bps"] > normal["effective_slippage_bps"]
+
+def test_priority_fee_spike_multiplier_raises_fee_under_stress():
+    base_fee = compute_priority_fee_sol({}, {}, S())
+    stressed_fee = compute_priority_fee_sol(
+        {"exit_decision": "FULL_EXIT", "exit_flags": ["cluster_dump_detected"]},
+        {"congestion_multiplier": 1.8, "priority_fee_avg_first_min": 0.00003, "sell_pressure": 0.95},
+        S(),
+    )
+    assert stressed_fee > base_fee
+    assert stressed_fee > S.PAPER_PRIORITY_FEE_BASE_SOL * 1.8
+
+
+def test_partial_fill_realism_impacts_executed_size_not_full_requested_size():
+    class LinearS(S):
+        FRICTION_MODEL_MODE = "linear"
+        PAPER_DEFAULT_SLIPPAGE_BPS = 0
+
+    result = compute_fill_realism(
+        {"requested_notional_sol": 4.0},
+        {"liquidity_usd": 1_000.0, "volatility": 0.0, "sol_usd": 100.0},
+        LinearS(),
+    )
+    expected = (4.0 * 100.0 * result["filled_fraction"] / result["effective_liquidity_usd"]) * 10_000
+    assert abs(result["estimated_price_impact_bps"] - expected) < 1e-6

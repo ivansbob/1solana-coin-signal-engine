@@ -132,7 +132,9 @@ def compute_fill_realism(order_ctx: dict[str, Any], market_ctx: dict[str, Any], 
     volatility = max(_safe_float(market_ctx.get("volatility") or market_ctx.get("volume_velocity"), 0.0), 0.0)
     requested_sol = max(_safe_float(order_ctx.get("requested_notional_sol"), 0.0), 0.0)
     requested_usd = requested_sol * _resolve_sol_usd(market_ctx, settings)
-    participation = max(requested_usd / effective_liquidity_usd, 0.0)
+    filled_fraction = compute_partial_fill_ratio(order_ctx, enriched_market_ctx, settings)
+    actual_executed_usd = requested_usd * filled_fraction
+    participation = max(actual_executed_usd / effective_liquidity_usd, 0.0)
 
     liquidity_sensitivity = _safe_float(getattr(settings, "PAPER_SLIPPAGE_LIQUIDITY_SENSITIVITY", 1.0), 1.0)
     default_slippage_bps = _safe_float(getattr(settings, "PAPER_DEFAULT_SLIPPAGE_BPS", 150.0), 150.0)
@@ -207,7 +209,7 @@ def compute_fill_realism(order_ctx: dict[str, Any], market_ctx: dict[str, Any], 
         "effective_liquidity_usd": round(effective_liquidity_usd, 6),
         "thin_depth_penalty_multiplier": thin_depth_penalty_multiplier,
         "fill_status": fill_status,
-        "filled_fraction": round(compute_partial_fill_ratio(order_ctx, enriched_market_ctx, settings), 6),
+        "filled_fraction": round(filled_fraction, 6),
         "execution_warning": execution_warning,
     }
 
@@ -217,11 +219,18 @@ def compute_slippage_bps(order_ctx: dict[str, Any], market_ctx: dict[str, Any], 
 
 
 def compute_priority_fee_sol(order_ctx: dict[str, Any], market_ctx: dict[str, Any], settings: Any) -> float:
-    congestion = float(market_ctx.get("congestion_multiplier") or 1.0)
-    if market_ctx.get("priority_fee_avg_first_min"):
-        congestion = max(congestion, float(market_ctx["priority_fee_avg_first_min"]))
-    congestion = max(congestion, _congestion_stress_multiplier(order_ctx, market_ctx, settings))
-    return max(float(getattr(settings, "PAPER_PRIORITY_FEE_BASE_SOL", 0.00002)) * max(congestion, 1.0), 0.0)
+    base_fee = max(_safe_float(getattr(settings, "PAPER_PRIORITY_FEE_BASE_SOL", 0.00002), 0.00002), 0.0)
+    congestion = max(_safe_float(market_ctx.get("congestion_multiplier"), 1.0), 1.0)
+    observed_priority_fee = max(_safe_float(market_ctx.get("priority_fee_avg_first_min"), 0.0), 0.0)
+    stress_multiplier = max(_congestion_stress_multiplier(order_ctx, market_ctx, settings), 1.0)
+    spike_multiplier = max(_safe_float(getattr(settings, "PAPER_PRIORITY_FEE_SPIKE_MULTIPLIER", 1.75), 1.75), 1.0)
+
+    fee = max(base_fee * congestion, observed_priority_fee)
+    stress_source = max(congestion, stress_multiplier)
+    if stress_source > 1.0:
+        fee *= 1.0 + (stress_source - 1.0) * max(spike_multiplier - 1.0, 0.0)
+
+    return max(fee, 0.0)
 
 
 def compute_failed_tx_probability(order_ctx: dict[str, Any], market_ctx: dict[str, Any], settings: Any) -> float:
