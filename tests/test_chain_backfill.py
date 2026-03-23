@@ -701,3 +701,191 @@ def test_seed_backfill_no_longer_stops_at_provider_unconfigured(monkeypatch):
     assert result["requested_start_ts"] == 1_773_619_200
     assert result["warning"] != "price_history_provider_unconfigured"
     assert result["price_path_status"] in {"complete", "partial", "missing"}
+
+
+class GeckoBackfillClient:
+    def __init__(self, *args, **kwargs):
+        self.kwargs = kwargs
+
+    def fetch_price_path(self, **kwargs):
+        pair_address = kwargs.get("pair_address")
+        if pair_address == "seed-pool":
+            return {
+                "token_address": kwargs["token_address"],
+                "pair_address": pair_address,
+                "selected_pool_address": "provider-pool",
+                "pool_address": "provider-pool",
+                "pool_resolver_source": "seed_pair_address",
+                "pool_resolver_confidence": "seed",
+                "pool_candidates_seen": 1,
+                "pool_resolution_status": "seed_pair_address",
+                "source_provider": "geckoterminal_pool_ohlcv",
+                "requested_start_ts": kwargs.get("start_ts"),
+                "requested_end_ts": kwargs.get("end_ts"),
+                "interval_sec": kwargs.get("interval_sec"),
+                "price_path": [
+                    {"timestamp": kwargs.get("start_ts"), "offset_sec": 0, "price": 1.0},
+                    {"timestamp": kwargs.get("start_ts") + 60, "offset_sec": 60, "price": 1.1},
+                ],
+                "truncated": False,
+                "missing": False,
+                "price_path_status": "complete",
+                "warning": None,
+            }
+        return {
+            "token_address": kwargs["token_address"],
+            "pair_address": pair_address,
+            "selected_pool_address": "resolved-pool",
+            "pool_address": "resolved-pool",
+            "pool_resolver_source": "geckoterminal",
+            "pool_resolver_confidence": "high",
+            "pool_candidates_seen": 4,
+            "pool_resolution_status": "resolved",
+            "source_provider": "geckoterminal_pool_ohlcv",
+            "requested_start_ts": kwargs.get("start_ts"),
+            "requested_end_ts": kwargs.get("end_ts"),
+            "interval_sec": kwargs.get("interval_sec"),
+            "price_path": [
+                {"timestamp": kwargs.get("start_ts"), "offset_sec": 0, "price": 2.0},
+                {"timestamp": kwargs.get("start_ts") + 60, "offset_sec": 60, "price": 2.2},
+            ],
+            "truncated": False,
+            "missing": False,
+            "price_path_status": "complete",
+            "warning": None,
+        }
+
+
+class GeckoMissingRowsClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def fetch_price_path(self, **kwargs):
+        return {
+            "token_address": kwargs["token_address"],
+            "pair_address": kwargs.get("pair_address"),
+            "selected_pool_address": "resolved-pool",
+            "pool_address": "resolved-pool",
+            "pool_resolver_source": "geckoterminal",
+            "pool_resolver_confidence": "high",
+            "pool_candidates_seen": 2,
+            "pool_resolution_status": "resolved",
+            "source_provider": "geckoterminal_pool_ohlcv",
+            "requested_start_ts": kwargs.get("start_ts"),
+            "requested_end_ts": kwargs.get("end_ts"),
+            "interval_sec": kwargs.get("interval_sec"),
+            "price_path": [],
+            "truncated": False,
+            "missing": True,
+            "price_path_status": "missing",
+            "warning": "no_pool_ohlcv_rows",
+        }
+
+
+def test_collect_price_paths_embeds_selected_pool_address_from_provider_result(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", GeckoBackfillClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "entry_time": "2026-03-16T00:00:00Z"},
+        {},
+        _base_config(price_history_provider="geckoterminal_pool_ohlcv", price_interval_sec=60, price_interval_fallbacks=[]),
+    )[0]
+
+    assert result["selected_pool_address"] == "resolved-pool"
+    assert result["pool_resolver_source"] == "geckoterminal"
+
+
+def test_collect_price_paths_preserves_pool_resolution_diagnostics_on_missing_rows(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", GeckoMissingRowsClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "entry_time": "2026-03-16T00:00:00Z"},
+        {},
+        _base_config(price_history_provider="geckoterminal_pool_ohlcv", price_interval_sec=60, price_interval_fallbacks=[], price_path_retry_attempts=1),
+    )[0]
+
+    assert result["missing"] is True
+    assert result["selected_pool_address"] == "resolved-pool"
+    assert result["warning"] == "no_pool_ohlcv_rows"
+
+
+def test_collect_price_paths_prefers_seed_pair_address_but_allows_provider_selected_pool_override(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", GeckoBackfillClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "seed-pool", "entry_time": "2026-03-16T00:00:00Z"},
+        {},
+        _base_config(price_history_provider="geckoterminal_pool_ohlcv", price_interval_sec=60, price_interval_fallbacks=[]),
+    )[0]
+
+    assert result["pair_address"] == "seed-pool"
+    assert result["selected_pool_address"] == "provider-pool"
+    assert result["pool_resolution_status"] == "seed_pair_address"
+
+
+def test_collect_price_paths_works_with_geckoterminal_pool_provider_and_replay_usable_minute_rows(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", GeckoBackfillClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "entry_time": "2026-03-16T00:00:00Z"},
+        {},
+        _base_config(price_history_provider="geckoterminal_pool_ohlcv", price_interval_sec=60, price_interval_fallbacks=[]),
+    )[0]
+
+    assert result["price_path_status"] == "complete"
+    assert len(result["price_path"]) >= 2
+    assert result["interval_sec"] == 60
+
+
+def test_collect_price_paths_preserves_best_partial_result_for_geckoterminal_provider(monkeypatch):
+    class GeckoPartialChooser(GeckoBackfillClient):
+        def fetch_price_path(self, **kwargs):
+            if kwargs.get("interval_sec") == 300:
+                return {
+                    "token_address": kwargs["token_address"],
+                    "pair_address": kwargs.get("pair_address"),
+                    "selected_pool_address": "resolved-pool",
+                    "pool_address": "resolved-pool",
+                    "pool_resolver_source": "geckoterminal",
+                    "pool_resolver_confidence": "high",
+                    "pool_candidates_seen": 3,
+                    "pool_resolution_status": "resolved",
+                    "source_provider": "geckoterminal_pool_ohlcv",
+                    "requested_start_ts": kwargs.get("start_ts"),
+                    "requested_end_ts": kwargs.get("end_ts"),
+                    "interval_sec": kwargs.get("interval_sec"),
+                    "price_path": [
+                        {"timestamp": kwargs.get("start_ts"), "offset_sec": 0, "price": 1.0},
+                        {"timestamp": kwargs.get("start_ts") + 300, "offset_sec": 300, "price": 1.2},
+                        {"timestamp": kwargs.get("start_ts") + 600, "offset_sec": 600, "price": 1.4},
+                    ],
+                    "truncated": True,
+                    "missing": False,
+                    "price_path_status": "partial",
+                    "warning": "price_path_incomplete",
+                }
+            return {
+                "token_address": kwargs["token_address"],
+                "pair_address": kwargs.get("pair_address"),
+                "selected_pool_address": "resolved-pool",
+                "pool_address": "resolved-pool",
+                "pool_resolver_source": "geckoterminal",
+                "pool_resolver_confidence": "high",
+                "pool_candidates_seen": 3,
+                "pool_resolution_status": "resolved",
+                "source_provider": "geckoterminal_pool_ohlcv",
+                "requested_start_ts": kwargs.get("start_ts"),
+                "requested_end_ts": kwargs.get("end_ts"),
+                "interval_sec": kwargs.get("interval_sec"),
+                "price_path": [{"timestamp": kwargs.get("start_ts"), "offset_sec": 0, "price": 1.0}],
+                "truncated": True,
+                "missing": False,
+                "price_path_status": "partial",
+                "warning": "price_path_incomplete",
+            }
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", GeckoPartialChooser)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "entry_time": "2026-03-16T00:00:00Z"},
+        {},
+        _base_config(price_history_provider="geckoterminal_pool_ohlcv", price_interval_sec=60, price_interval_fallbacks=[300], price_path_window_fallback_multipliers=[]),
+    )[0]
+
+    assert result["interval_sec"] == 300
+    assert len(result["price_path"]) == 3
