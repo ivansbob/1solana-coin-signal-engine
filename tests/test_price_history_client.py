@@ -12,6 +12,40 @@ class PayloadClient(PriceHistoryClient):
         return self.payload
 
 
+class GeckoTerminalClient(PriceHistoryClient):
+    def __init__(self, *, resolver_result=None, ohlcv_payloads=None, **kwargs):
+        super().__init__(
+            base_url="https://api.geckoterminal.com/api/v2",
+            provider="geckoterminal_pool_ohlcv",
+            token_endpoint="networks/{network}/tokens/{token_address}/pools",
+            pair_endpoint="networks/{network}/pools/{pool_address}/ohlcv/{timeframe}",
+            chain="solana",
+            include_empty_intervals=True,
+            request_version="20230302",
+            currency="usd",
+            pool_resolver="geckoterminal",
+            max_ohlcv_limit=kwargs.pop("max_ohlcv_limit", 1000),
+            **kwargs,
+        )
+        self.resolver_result = resolver_result
+        self.ohlcv_payloads = list(ohlcv_payloads or [])
+        self.fetch_calls = []
+        self.resolve_calls = []
+
+    def _resolve_geckoterminal_pool(self, token_address: str, network: str = "solana"):
+        self.resolve_calls.append((token_address, network))
+        if self.resolver_result is not None:
+            return dict(self.resolver_result)
+        return super()._resolve_geckoterminal_pool(token_address, network)
+
+    def _fetch_geckoterminal_pool_ohlcv(self, pool_address: str, **kwargs):
+        call = {"pool_address": pool_address, **kwargs}
+        self.fetch_calls.append(call)
+        if self.ohlcv_payloads:
+            return self.ohlcv_payloads.pop(0)
+        return {"data": {"attributes": {"ohlcv_list": []}}}
+
+
 def test_fetch_price_path_marks_unparseable_rows_distinct_from_no_rows():
     client = PayloadClient({"rows": [{"timestamp": None, "price": "nanx"}], "warning": None})
     result = client.fetch_price_path(token_address="tok", pair_address="pair", start_ts=1000, end_ts=1120)
@@ -85,3 +119,161 @@ def test_price_history_client_preserves_real_empty_payload_warning_when_provider
 
     assert result["warning"] == "provider_empty_payload"
     assert result["price_history_provider_status"] == "configured"
+
+
+def test_price_history_client_normalizes_geckoterminal_provider_aliases():
+    resolved = resolve_price_history_provider({"backfill": {"price_history_provider": "geckoterminal_pool"}})
+
+    assert resolved["price_history_provider"] == "geckoterminal_pool_ohlcv"
+
+
+def test_validate_price_history_provider_config_accepts_geckoterminal_defaults():
+    config = {
+        "backfill": {"price_history_provider": "geckoterminal_pool_ohlcv"},
+        "providers": {
+            "price_history": {
+                "provider": "geckoterminal_pool_ohlcv",
+                "base_url": "https://api.geckoterminal.com/api/v2",
+                "chain": "solana",
+                "currency": "usd",
+                "include_empty_intervals": True,
+                "pool_resolver": "geckoterminal",
+                "resolver_cache_ttl_sec": 86400,
+                "max_ohlcv_limit": 1000,
+                "request_version": "20230302",
+                "allow_pairless_token_lookup": True,
+                "require_pair_address": False,
+            }
+        },
+    }
+
+    bootstrap = validate_price_history_provider_config(config)
+
+    assert bootstrap["provider_bootstrap_ok"] is True
+    assert bootstrap["price_history_provider"] == "geckoterminal_pool_ohlcv"
+    assert bootstrap["request_version"] == "20230302"
+    assert bootstrap["provider_request_summary"]["include_empty_intervals"] is True
+    assert bootstrap["provider_request_summary"]["max_ohlcv_limit"] == 1000
+
+
+def test_fetch_price_path_resolves_pool_before_fetching_geckoterminal_ohlcv():
+    client = GeckoTerminalClient(
+        resolver_result={
+            "pool_address": "pool-1",
+            "resolver_source": "geckoterminal",
+            "resolver_confidence": "high",
+            "pool_candidates_seen": 3,
+            "pool_resolution_status": "resolved",
+        },
+        ohlcv_payloads=[{"data": {"attributes": {"ohlcv_list": [[1000, 1.0, 1.0, 1.0, 1.0, 10.0]]}}}],
+    )
+
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1000, interval_sec=60, limit=1000)
+
+    assert client.resolve_calls == [("tok", "solana")]
+    assert client.fetch_calls[0]["pool_address"] == "pool-1"
+    assert result["selected_pool_address"] == "pool-1"
+    assert result["pool_resolution_status"] == "resolved"
+
+
+def test_fetch_price_path_normalizes_geckoterminal_ohlcv_list():
+    client = GeckoTerminalClient(
+        resolver_result={
+            "pool_address": "pool-1",
+            "resolver_source": "geckoterminal",
+            "resolver_confidence": "high",
+            "pool_candidates_seen": 1,
+            "pool_resolution_status": "resolved",
+        },
+        ohlcv_payloads=[
+            {"data": {"attributes": {"ohlcv_list": [[1060, 1, 2, 0.5, 1.5, 11], [1000, 1, 2, 0.5, 1.2, 9]]}}}
+        ],
+    )
+
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1060, interval_sec=60, limit=1000)
+
+    assert result["price_path"] == [
+        {"timestamp": 1000, "offset_sec": 0, "price": 1.2, "volume": 9.0},
+        {"timestamp": 1060, "offset_sec": 60, "price": 1.5, "volume": 11.0},
+    ]
+    assert result["provider_row_count"] == 2
+
+
+def test_fetch_price_path_marks_missing_when_pool_resolution_returns_no_candidates():
+    client = GeckoTerminalClient(
+        resolver_result={
+            "pool_address": None,
+            "resolver_source": "geckoterminal",
+            "resolver_confidence": "none",
+            "pool_candidates_seen": 0,
+            "pool_resolution_status": "pool_resolution_failed",
+            "warning": "pool_resolution_failed",
+        }
+    )
+
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1060)
+
+    assert result["missing"] is True
+    assert result["warning"] == "pool_resolution_failed"
+    assert result["provider_row_count"] == 0
+
+
+def test_fetch_price_path_keeps_pool_resolution_provenance_fields():
+    client = GeckoTerminalClient(
+        resolver_result={
+            "pool_address": "pool-1",
+            "resolver_source": "geckoterminal",
+            "resolver_confidence": "high",
+            "pool_candidates_seen": 7,
+            "pool_resolution_status": "resolved",
+        },
+        ohlcv_payloads=[{"data": {"attributes": {"ohlcv_list": [[1000, 1, 1, 1, 1.0, 10]]}}}],
+    )
+
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1000)
+
+    assert result["pool_resolver_source"] == "geckoterminal"
+    assert result["pool_resolver_confidence"] == "high"
+    assert result["pool_candidates_seen"] == 7
+    assert result["provider_request_summary"]["selected_pool_address"] == "pool-1"
+
+
+def test_fetch_price_path_uses_include_empty_intervals_for_minute_series():
+    client = GeckoTerminalClient(
+        resolver_result={
+            "pool_address": "pool-1",
+            "resolver_source": "geckoterminal",
+            "resolver_confidence": "high",
+            "pool_candidates_seen": 1,
+            "pool_resolution_status": "resolved",
+        },
+        ohlcv_payloads=[{"data": {"attributes": {"ohlcv_list": [[1000, 1, 1, 1, 1.0, 10]]}}}],
+    )
+
+    client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1000, interval_sec=60, limit=1000)
+
+    assert client.fetch_calls[0]["interval_sec"] == 60
+    assert client.fetch_calls[0]["limit"] == 1000
+
+
+def test_fetch_price_path_paginates_backwards_with_before_timestamp_when_range_exceeds_limit():
+    client = GeckoTerminalClient(
+        resolver_result={
+            "pool_address": "pool-1",
+            "resolver_source": "geckoterminal",
+            "resolver_confidence": "high",
+            "pool_candidates_seen": 1,
+            "pool_resolution_status": "resolved",
+        },
+        ohlcv_payloads=[
+            {"data": {"attributes": {"ohlcv_list": [[1120, 1, 1, 1, 1.3, 10], [1060, 1, 1, 1, 1.2, 10]]}}},
+            {"data": {"attributes": {"ohlcv_list": [[1000, 1, 1, 1, 1.1, 10]]}}},
+        ],
+        max_ohlcv_limit=2,
+    )
+
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1120, interval_sec=60, limit=2)
+
+    assert len(client.fetch_calls) == 2
+    assert client.fetch_calls[1]["end_ts"] == 1059
+    assert [point["timestamp"] for point in result["price_path"]] == [1000, 1060, 1120]

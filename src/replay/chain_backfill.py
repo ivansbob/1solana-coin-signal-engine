@@ -553,6 +553,11 @@ def _build_missing_price_path(
     time_anchor_candidates: list[dict[str, Any]] | None = None,
     time_anchor_discarded_candidates: list[dict[str, Any]] | None = None,
     time_anchor_preference_applied: bool = False,
+    selected_pool_address: str | None = None,
+    pool_resolver_source: str | None = None,
+    pool_resolver_confidence: str | None = None,
+    pool_candidates_seen: int | None = None,
+    pool_resolution_status: str | None = None,
 ) -> dict[str, Any]:
     return {
         "token_address": token,
@@ -588,6 +593,11 @@ def _build_missing_price_path(
         "time_anchor_candidates": time_anchor_candidates or [],
         "time_anchor_discarded_candidates": time_anchor_discarded_candidates or [],
         "time_anchor_preference_applied": bool(time_anchor_preference_applied),
+        "selected_pool_address": selected_pool_address,
+        "pool_resolver_source": pool_resolver_source,
+        "pool_resolver_confidence": pool_resolver_confidence,
+        "pool_candidates_seen": pool_candidates_seen,
+        "pool_resolution_status": pool_resolution_status,
     }
 
 
@@ -630,6 +640,11 @@ def _attempt_summary(path: dict[str, Any], *, strategy: str, fallback_mode: str 
         "missing": bool(path.get("missing")),
         "warning": path.get("warning"),
         "point_count": _price_path_points(path),
+        "selected_pool_address": path.get("selected_pool_address") or path.get("pool_address"),
+        "pool_resolver_source": path.get("pool_resolver_source"),
+        "pool_resolver_confidence": path.get("pool_resolver_confidence"),
+        "pool_candidates_seen": path.get("pool_candidates_seen"),
+        "pool_resolution_status": path.get("pool_resolution_status"),
         "provider_request_summary": path.get("provider_request_summary") or {},
     }
 
@@ -824,6 +839,13 @@ def _collect_price_paths(
         provider_config_source=provider_config_source,
         auth_header=str(provider_config.get("auth_header") or "X-API-KEY"),
         request_kind=str(provider_config.get("request_kind") or "ohlcv"),
+        request_version=provider_config.get("request_version"),
+        currency=str(provider_config.get("currency") or "usd"),
+        token_side=str(provider_config.get("token_side") or "token"),
+        include_empty_intervals=bool(provider_config.get("include_empty_intervals", True)),
+        pool_resolver=provider_config.get("pool_resolver"),
+        resolver_cache_ttl_sec=int(provider_config.get("resolver_cache_ttl_sec") or 0),
+        max_ohlcv_limit=int(provider_config.get("max_ohlcv_limit") or 1000),
     )
 
     attempts = _iter_price_path_attempts(token, pair_address, start_ts, config)
@@ -869,6 +891,12 @@ def _collect_price_paths(
             interval_sec=attempt["interval_sec"],
             limit=limit,
         )
+        if attempt.get("pair_address") and not path.get("pool_resolution_status"):
+            path["pool_resolution_status"] = "seed_pair_address"
+        if attempt.get("pair_address") and not path.get("selected_pool_address"):
+            path["selected_pool_address"] = path.get("pool_address")
+        if attempt.get("pair_address") and not path.get("pool_resolver_source"):
+            path["pool_resolver_source"] = "seed_pair_address"
         summary = _attempt_summary(path, strategy=attempt["strategy"], fallback_mode=attempt["strategy"] if attempt["strategy"] != "primary" else None)
         attempt_summaries.append(summary)
         results.append(path)
@@ -920,6 +948,11 @@ def _collect_price_paths(
             "resolved_via_fallback": fallback_mode is not None,
             "fallback_mode": fallback_mode,
             "pair_address": enriched.get("pair_address"),
+            "selected_pool_address": enriched.get("selected_pool_address") or enriched.get("pool_address"),
+            "pool_resolver_source": enriched.get("pool_resolver_source"),
+            "pool_resolver_confidence": enriched.get("pool_resolver_confidence"),
+            "pool_candidates_seen": enriched.get("pool_candidates_seen"),
+            "pool_resolution_status": enriched.get("pool_resolution_status") or ("seed_pair_address" if enriched.get("pair_address") else None),
             "price_path_time_source": start_context.get("price_path_time_source"),
             "price_path_time_derived": bool(start_context.get("price_path_time_derived")),
             "price_path_anchor_field": start_context.get("price_path_anchor_field"),

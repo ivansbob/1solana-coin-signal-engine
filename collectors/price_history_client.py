@@ -17,6 +17,9 @@ _PROVIDER_ALIASES = {
     "birdeye_ohlcv_v3": "birdeye_ohlcv_v3",
     "birdeye_history": "birdeye_price_history",
     "birdeye_price_history": "birdeye_price_history",
+    "geckoterminal": "geckoterminal_pool_ohlcv",
+    "geckoterminal_pool": "geckoterminal_pool_ohlcv",
+    "geckoterminal_pool_ohlcv": "geckoterminal_pool_ohlcv",
 }
 
 _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -39,6 +42,23 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
         "require_pair_address": False,
         "allow_pairless_token_lookup": True,
         "request_kind": "history_price",
+    },
+    "geckoterminal_pool_ohlcv": {
+        "base_url": "https://api.geckoterminal.com/api/v2",
+        "token_endpoint": "networks/{network}/tokens/{token_address}/pools",
+        "pair_endpoint": "networks/{network}/pools/{pool_address}/ohlcv/{timeframe}",
+        "chain": "solana",
+        "auth_header": None,
+        "require_pair_address": False,
+        "allow_pairless_token_lookup": True,
+        "request_kind": "pool_ohlcv",
+        "request_version": "20230302",
+        "currency": "usd",
+        "token_side": "token",
+        "include_empty_intervals": True,
+        "pool_resolver": "geckoterminal",
+        "resolver_cache_ttl_sec": 86400,
+        "max_ohlcv_limit": 1000,
     },
 }
 
@@ -84,6 +104,43 @@ _REQUIRE_PAIR_KEY_PATHS = (
 _PAIRLESS_KEY_PATHS = (
     ("providers", "price_history", "allow_pairless_token_lookup"),
     ("price_history", "allow_pairless_token_lookup"),
+)
+
+_REQUEST_VERSION_KEY_PATHS = (
+    ("providers", "price_history", "request_version"),
+    ("price_history", "request_version"),
+)
+
+_CURRENCY_KEY_PATHS = (
+    ("providers", "price_history", "currency"),
+    ("price_history", "currency"),
+)
+
+_TOKEN_SIDE_KEY_PATHS = (
+    ("providers", "price_history", "token_side"),
+    ("providers", "price_history", "token"),
+    ("price_history", "token_side"),
+    ("price_history", "token"),
+)
+
+_INCLUDE_EMPTY_INTERVALS_KEY_PATHS = (
+    ("providers", "price_history", "include_empty_intervals"),
+    ("price_history", "include_empty_intervals"),
+)
+
+_POOL_RESOLVER_KEY_PATHS = (
+    ("providers", "price_history", "pool_resolver"),
+    ("price_history", "pool_resolver"),
+)
+
+_RESOLVER_CACHE_TTL_KEY_PATHS = (
+    ("providers", "price_history", "resolver_cache_ttl_sec"),
+    ("price_history", "resolver_cache_ttl_sec"),
+)
+
+_MAX_OHLCV_LIMIT_KEY_PATHS = (
+    ("providers", "price_history", "max_ohlcv_limit"),
+    ("price_history", "max_ohlcv_limit"),
 )
 
 _DISABLED_PROVIDER_NAMES = {"disabled", "off", "none", "false", "0"}
@@ -225,6 +282,13 @@ def validate_price_history_provider_config(config: dict[str, Any]) -> dict[str, 
     chain, _ = _first_config_value(config, _CHAIN_KEY_PATHS)
     require_pair_address, _ = _first_config_value(config, _REQUIRE_PAIR_KEY_PATHS)
     allow_pairless_token_lookup, _ = _first_config_value(config, _PAIRLESS_KEY_PATHS)
+    request_version, _ = _first_config_value(config, _REQUEST_VERSION_KEY_PATHS)
+    currency, _ = _first_config_value(config, _CURRENCY_KEY_PATHS)
+    token_side, _ = _first_config_value(config, _TOKEN_SIDE_KEY_PATHS)
+    include_empty_intervals, _ = _first_config_value(config, _INCLUDE_EMPTY_INTERVALS_KEY_PATHS)
+    pool_resolver, _ = _first_config_value(config, _POOL_RESOLVER_KEY_PATHS)
+    resolver_cache_ttl_sec, _ = _first_config_value(config, _RESOLVER_CACHE_TTL_KEY_PATHS)
+    max_ohlcv_limit, _ = _first_config_value(config, _MAX_OHLCV_LIMIT_KEY_PATHS)
 
     merged = {
         "price_history_provider": provider_name,
@@ -238,9 +302,16 @@ def validate_price_history_provider_config(config: dict[str, Any]) -> dict[str, 
         "request_kind": str(defaults.get("request_kind") or "ohlcv"),
         "chain": str(chain or defaults.get("chain") or "solana").strip() or "solana",
         "api_key": str(api_key or "").strip(),
-        "auth_header": str(defaults.get("auth_header") or "X-API-KEY"),
+        "auth_header": None if defaults.get("auth_header") is None and not api_key else str(defaults.get("auth_header") or "X-API-KEY"),
         "require_pair_address": _coerce_bool(require_pair_address, bool(defaults.get("require_pair_address", False))),
         "allow_pairless_token_lookup": _coerce_bool(allow_pairless_token_lookup, bool(defaults.get("allow_pairless_token_lookup", True))),
+        "request_version": str(request_version or defaults.get("request_version") or "").strip() or None,
+        "currency": str(currency or defaults.get("currency") or "usd").strip() or "usd",
+        "token_side": str(token_side or defaults.get("token_side") or "token").strip() or "token",
+        "include_empty_intervals": _coerce_bool(include_empty_intervals, bool(defaults.get("include_empty_intervals", True))),
+        "pool_resolver": str(pool_resolver or defaults.get("pool_resolver") or "").strip() or None,
+        "resolver_cache_ttl_sec": _coerce_int(resolver_cache_ttl_sec if resolver_cache_ttl_sec is not None else defaults.get("resolver_cache_ttl_sec")) or 0,
+        "max_ohlcv_limit": min(max(_coerce_int(max_ohlcv_limit if max_ohlcv_limit is not None else defaults.get("max_ohlcv_limit")) or 1000, 1), 1000),
     }
     merged["provider_request_summary"] = {
         "provider": merged.get("price_history_provider"),
@@ -253,6 +324,13 @@ def validate_price_history_provider_config(config: dict[str, Any]) -> dict[str, 
         "api_key_present": bool(merged.get("api_key")),
         "require_pair_address": bool(merged.get("require_pair_address")),
         "allow_pairless_token_lookup": bool(merged.get("allow_pairless_token_lookup")),
+        "request_version": merged.get("request_version"),
+        "currency": merged.get("currency"),
+        "token_side": merged.get("token_side"),
+        "include_empty_intervals": bool(merged.get("include_empty_intervals")),
+        "pool_resolver": merged.get("pool_resolver"),
+        "resolver_cache_ttl_sec": merged.get("resolver_cache_ttl_sec"),
+        "max_ohlcv_limit": merged.get("max_ohlcv_limit"),
     }
     return merged
 
@@ -347,6 +425,9 @@ def build_price_history_request(
             "time_to": end_ts or 0,
             "type": interval_label,
         }
+    elif provider_name == "geckoterminal_pool_ohlcv":
+        endpoint = None
+        params = {}
     else:
         params = {
             "token_address": token_address,
@@ -380,6 +461,14 @@ def build_price_history_request(
         "start_ts": start_ts,
         "end_ts": end_ts,
         "limit": limit,
+        "request_kind": provider_config.get("request_kind"),
+        "request_version": provider_config.get("request_version"),
+        "currency": provider_config.get("currency"),
+        "token_side": provider_config.get("token_side"),
+        "include_empty_intervals": provider_config.get("include_empty_intervals"),
+        "pool_resolver": provider_config.get("pool_resolver"),
+        "resolver_cache_ttl_sec": provider_config.get("resolver_cache_ttl_sec"),
+        "max_ohlcv_limit": provider_config.get("max_ohlcv_limit"),
     }
     return {
         "ok": provider_status == "configured",
@@ -432,6 +521,13 @@ class PriceHistoryClient:
         provider_config_source: str | None = None,
         auth_header: str = "X-API-KEY",
         request_kind: str = "ohlcv",
+        request_version: str | None = None,
+        currency: str = "usd",
+        token_side: str = "token",
+        include_empty_intervals: bool = True,
+        pool_resolver: str | None = None,
+        resolver_cache_ttl_sec: int = 0,
+        max_ohlcv_limit: int = 1000,
     ) -> None:
         self.base_url = str(base_url or "").strip().rstrip("/")
         self.api_key = str(api_key or "").strip()
@@ -445,6 +541,14 @@ class PriceHistoryClient:
         self.provider_config_source = provider_config_source
         self.auth_header = str(auth_header or "X-API-KEY")
         self.request_kind = str(request_kind or "ohlcv")
+        self.request_version = str(request_version or "").strip() or None
+        self.currency = str(currency or "usd").strip() or "usd"
+        self.token_side = str(token_side or "token").strip() or "token"
+        self.include_empty_intervals = bool(include_empty_intervals)
+        self.pool_resolver = str(pool_resolver or "").strip() or None
+        self.resolver_cache_ttl_sec = max(int(resolver_cache_ttl_sec or 0), 0)
+        self.max_ohlcv_limit = min(max(int(max_ohlcv_limit or 1000), 1), 1000)
+        self._resolver_cache: dict[str, tuple[int, dict[str, Any]]] = {}
 
     def provider_bootstrap(self) -> dict[str, Any]:
         return {
@@ -461,6 +565,13 @@ class PriceHistoryClient:
             "require_pair_address": self.require_pair_address,
             "allow_pairless_token_lookup": self.allow_pairless_token_lookup,
             "request_kind": self.request_kind,
+            "request_version": self.request_version,
+            "currency": self.currency,
+            "token_side": self.token_side,
+            "include_empty_intervals": self.include_empty_intervals,
+            "pool_resolver": self.pool_resolver,
+            "resolver_cache_ttl_sec": self.resolver_cache_ttl_sec,
+            "max_ohlcv_limit": self.max_ohlcv_limit,
             "provider_request_summary": {
                 "provider": self.provider,
                 "provider_status": self.provider_status,
@@ -472,6 +583,13 @@ class PriceHistoryClient:
                 "api_key_present": bool(self.api_key),
                 "require_pair_address": self.require_pair_address,
                 "allow_pairless_token_lookup": self.allow_pairless_token_lookup,
+                "request_version": self.request_version,
+                "currency": self.currency,
+                "token_side": self.token_side,
+                "include_empty_intervals": self.include_empty_intervals,
+                "pool_resolver": self.pool_resolver,
+                "resolver_cache_ttl_sec": self.resolver_cache_ttl_sec,
+                "max_ohlcv_limit": self.max_ohlcv_limit,
             },
         }
 
@@ -489,10 +607,7 @@ class PriceHistoryClient:
             req_headers[self.auth_header] = self.api_key
         if headers:
             req_headers.update(headers)
-        req = Request(
-            f"{self.base_url}/{endpoint}?{urlencode(query)}",
-            headers=req_headers,
-        )
+        req = Request(f"{self.base_url}/{endpoint}?{urlencode(query)}", headers=req_headers)
         try:
             with urlopen(req, timeout=20) as response:
                 raw_body = response.read().decode("utf-8", errors="replace")
@@ -515,18 +630,13 @@ class PriceHistoryClient:
             except Exception:
                 body_text = None
                 body_payload = None
-
             if isinstance(body_payload, dict):
-                provider_error_message = (
-                    body_payload.get("message")
-                    or body_payload.get("error")
-                    or body_payload.get("warning")
-                )
-
+                provider_error_message = body_payload.get("message") or body_payload.get("error") or body_payload.get("warning")
+            warning = "provider_rate_limited" if int(exc.code or 0) == 429 else "provider_http_error"
             return {
                 "rows": [],
                 "missing": True,
-                "warning": "provider_http_error",
+                "warning": warning,
                 "http_status": int(exc.code),
                 "provider_error_message": str(provider_error_message).strip() if provider_error_message else None,
                 "provider_error_body": body_text,
@@ -558,33 +668,312 @@ class PriceHistoryClient:
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            ts = _coerce_int(
-                row.get("timestamp")
-                or row.get("unixTime")
-                or row.get("unix_time")
-                or row.get("ts")
-                or row.get("time")
-                or row.get("t")
-            )
-            price = _coerce_float(
-                row.get("price")
-                or row.get("close")
-                or row.get("c")
-                or row.get("close_price")
-                or row.get("value")
-            )
+            ts = _coerce_int(row.get("timestamp") or row.get("unixTime") or row.get("unix_time") or row.get("ts") or row.get("time") or row.get("t"))
+            price = _coerce_float(row.get("price") or row.get("close") or row.get("c") or row.get("close_price") or row.get("value"))
             if ts is None or price is None:
                 continue
             offset = _coerce_int(row.get("offset_sec") or row.get("elapsed_sec"))
             if offset is None and start_ts is not None:
                 offset = max(0, ts - start_ts)
-            observations.append({
-                "timestamp": ts,
-                "offset_sec": int(offset or 0),
-                "price": price,
-            })
+            observations.append({"timestamp": ts, "offset_sec": int(offset or 0), "price": price})
         observations.sort(key=lambda item: (item.get("offset_sec", 0), item.get("timestamp", 0)))
         return observations
+
+    def _geckoterminal_network(self) -> str:
+        return str(self.chain or "solana").strip() or "solana"
+
+    def _format_endpoint(self, template: str, **kwargs: Any) -> str:
+        return str(template or "").format(**kwargs).lstrip("/")
+
+    def _extract_geckoterminal_pool_candidates(self, payload: Any) -> list[dict[str, Any]]:
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            return []
+        included_map: dict[str, dict[str, Any]] = {}
+        included = payload.get("included") if isinstance(payload, dict) else None
+        if isinstance(included, list):
+            for item in included:
+                if isinstance(item, dict):
+                    included_map[f"{item.get('type')}:{item.get('id')}"] = item
+        pools: list[dict[str, Any]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+            relationships = item.get("relationships") if isinstance(item.get("relationships"), dict) else {}
+            dex_name = str(attrs.get("dex_name") or "")
+            dex_ref = ((relationships.get("dex") or {}).get("data") if isinstance(relationships.get("dex"), dict) else None)
+            if isinstance(dex_ref, dict):
+                dex_item = included_map.get(f"{dex_ref.get('type')}:{dex_ref.get('id')}")
+                if isinstance(dex_item, dict):
+                    dex_name = str((dex_item.get("attributes") or {}).get("name") or dex_name)
+            pools.append(
+                {
+                    "pool_address": item.get("id"),
+                    "reserve_in_usd": _coerce_float(attrs.get("reserve_in_usd") or attrs.get("reserve_usd")) or 0.0,
+                    "volume_usd_h24": _coerce_float(attrs.get("volume_usd") or attrs.get("volume_usd_h24")) or 0.0,
+                    "market_cap_usd": _coerce_float(attrs.get("market_cap_usd")) or 0.0,
+                    "dex_name": dex_name,
+                    "name": str(attrs.get("name") or ""),
+                }
+            )
+        return pools
+
+    def _select_canonical_pool(self, pools: list[dict[str, Any]]) -> dict[str, Any] | None:
+        candidates = [pool for pool in pools if str(pool.get("pool_address") or "").strip()]
+        if not candidates:
+            return None
+        return sorted(
+            candidates,
+            key=lambda item: (
+                -float(item.get("reserve_in_usd") or 0.0),
+                -float(item.get("volume_usd_h24") or 0.0),
+                -float(item.get("market_cap_usd") or 0.0),
+                str(item.get("dex_name") or ""),
+                str(item.get("pool_address") or ""),
+            ),
+        )[0]
+
+    def _resolve_geckoterminal_pool(self, token_address: str, network: str = "solana") -> dict[str, Any]:
+        import time
+
+        cache_key = f"{network}:{token_address}"
+        now = int(time.time())
+        cached = self._resolver_cache.get(cache_key)
+        if self.resolver_cache_ttl_sec > 0 and cached and cached[0] > now:
+            return dict(cached[1])
+        endpoint = self._format_endpoint(self.token_endpoint, network=network, token_address=token_address)
+        params = {"page": 1}
+        if self.token_side:
+            params["token"] = self.token_side
+        if self.request_version:
+            params["request_version"] = self.request_version
+        payload = self._get(endpoint, params)
+        pools = self._extract_geckoterminal_pool_candidates(payload)
+        selected = self._select_canonical_pool(pools)
+        result = {
+            "pool_address": selected.get("pool_address") if selected else None,
+            "resolver_source": self.pool_resolver or "geckoterminal",
+            "resolver_confidence": "high" if selected else "none",
+            "pool_candidates_seen": len(pools),
+            "pool_resolution_status": "resolved" if selected else "pool_resolution_failed",
+            "http_status": payload.get("http_status") if isinstance(payload, dict) else None,
+            "provider_error_message": payload.get("provider_error_message") if isinstance(payload, dict) else None,
+            "warning": None if selected else ((payload.get("warning") if isinstance(payload, dict) else None) or "pool_resolution_failed"),
+        }
+        if self.resolver_cache_ttl_sec > 0:
+            self._resolver_cache[cache_key] = (now + self.resolver_cache_ttl_sec, dict(result))
+        return result
+
+    def _geckoterminal_aggregate(self, interval_sec: int) -> int:
+        if interval_sec <= 60:
+            return 1
+        if interval_sec <= 300:
+            return 5
+        return 15
+
+    def _fetch_geckoterminal_pool_ohlcv(
+        self,
+        pool_address: str,
+        *,
+        start_ts: int | None,
+        end_ts: int | None,
+        interval_sec: int,
+        limit: int,
+        network: str,
+    ) -> Any:
+        endpoint = self._format_endpoint(self.pair_endpoint, network=network, pool_address=pool_address, timeframe="minute")
+        params = {
+            "aggregate": self._geckoterminal_aggregate(interval_sec),
+            "before_timestamp": end_ts,
+            "limit": min(max(limit, 1), self.max_ohlcv_limit),
+            "currency": self.currency,
+            "include_empty_intervals": str(bool(self.include_empty_intervals)).lower(),
+        }
+        if self.request_version:
+            params["request_version"] = self.request_version
+        return self._get(endpoint, params)
+
+    def _extract_geckoterminal_ohlcv_rows(self, payload: Any) -> list[list[Any]]:
+        if not isinstance(payload, dict):
+            return []
+        attrs = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        attributes = attrs.get("attributes") if isinstance(attrs.get("attributes"), dict) else {}
+        rows = attributes.get("ohlcv_list")
+        return [row for row in rows if isinstance(row, list) and len(row) >= 6] if isinstance(rows, list) else []
+
+    def _normalize_geckoterminal_ohlcv_list(self, rows: list[list[Any]], *, start_ts: int | None, end_ts: int | None) -> list[dict[str, Any]]:
+        observations: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for row in rows:
+            ts = _coerce_int(row[0] if len(row) > 0 else None)
+            price = _coerce_float(row[4] if len(row) > 4 else None)
+            volume = _coerce_float(row[5] if len(row) > 5 else None)
+            if ts is None or price is None or ts in seen:
+                continue
+            if start_ts is not None and ts < start_ts:
+                continue
+            if end_ts is not None and ts > end_ts:
+                continue
+            seen.add(ts)
+            observations.append({
+                "timestamp": ts,
+                "offset_sec": max(0, ts - int(start_ts or ts)),
+                "price": price,
+                "volume": volume,
+            })
+        observations.sort(key=lambda item: item["timestamp"])
+        return observations
+
+    def _fetch_geckoterminal_price_path(
+        self,
+        *,
+        token_address: str,
+        pair_address: str | None,
+        start_ts: int | None,
+        end_ts: int | None,
+        interval_sec: int,
+        limit: int,
+        provider_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        request_summary = dict(provider_config.get("provider_request_summary") or {})
+        request_summary.update({
+            "requested_token_address": token_address,
+            "requested_pair_address": pair_address,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "interval_sec": interval_sec,
+            "interval_label": _interval_label(interval_sec),
+            "limit": limit,
+            "request_kind": "pool_ohlcv",
+        })
+        network = self._geckoterminal_network()
+        pool_info = {
+            "pool_address": pair_address,
+            "resolver_source": "seed_pair_address" if pair_address else self.pool_resolver or "geckoterminal",
+            "resolver_confidence": "seed" if pair_address else "none",
+            "pool_candidates_seen": 1 if pair_address else 0,
+            "pool_resolution_status": "seed_pair_address" if pair_address else "pool_resolution_failed",
+            "warning": None,
+            "http_status": None,
+            "provider_error_message": None,
+        }
+        if not pair_address:
+            pool_info = self._resolve_geckoterminal_pool(token_address, network=network)
+        selected_pool_address = pool_info.get("pool_address")
+        request_summary.update({
+            "network": network,
+            "selected_pool_address": selected_pool_address,
+            "pool_resolver_source": pool_info.get("resolver_source"),
+            "pool_resolver_confidence": pool_info.get("resolver_confidence"),
+            "pool_candidates_seen": pool_info.get("pool_candidates_seen"),
+            "pool_resolution_status": pool_info.get("pool_resolution_status"),
+        })
+        request_params = {
+            "token_address": token_address,
+            "pair_address": pair_address or None,
+            "pool_address": selected_pool_address,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "interval_sec": interval_sec,
+            "limit": limit,
+        }
+        if not selected_pool_address:
+            return {
+                "token_address": token_address,
+                "pair_address": pair_address,
+                "pool_address": None,
+                "selected_pool_address": None,
+                "pool_resolver_source": pool_info.get("resolver_source"),
+                "pool_resolver_confidence": pool_info.get("resolver_confidence"),
+                "pool_candidates_seen": pool_info.get("pool_candidates_seen"),
+                "pool_resolution_status": "pool_resolution_failed",
+                "source_provider": self.provider,
+                "price_history_provider": self.provider,
+                "price_history_provider_status": self.provider_status,
+                "provider_bootstrap_ok": self.provider_status == "configured",
+                "provider_config_source": self.provider_config_source,
+                "provider_request_summary": request_summary,
+                "requested_start_ts": start_ts,
+                "requested_end_ts": end_ts,
+                "interval_sec": interval_sec,
+                "request_params": request_params,
+                "provider_row_count": 0,
+                "price_path": [],
+                "truncated": False,
+                "missing": True,
+                "price_path_status": "missing",
+                "warning": pool_info.get("warning") or "pool_resolution_failed",
+                "http_status": pool_info.get("http_status"),
+                "provider_error_message": pool_info.get("provider_error_message"),
+                "provider_error_body": None,
+                "provider_error_payload": None,
+            }
+        raw_rows: list[list[Any]] = []
+        before_ts = end_ts
+        warning = None
+        http_status = None
+        provider_error_message = None
+        seen_oldest: set[int] = set()
+        while True:
+            payload = self._fetch_geckoterminal_pool_ohlcv(
+                selected_pool_address,
+                start_ts=start_ts,
+                end_ts=before_ts,
+                interval_sec=interval_sec,
+                limit=min(limit, self.max_ohlcv_limit),
+                network=network,
+            )
+            batch = self._extract_geckoterminal_ohlcv_rows(payload)
+            raw_rows.extend(batch)
+            if isinstance(payload, dict):
+                warning = payload.get("warning") or warning
+                http_status = payload.get("http_status", http_status)
+                provider_error_message = payload.get("provider_error_message", provider_error_message)
+            if not batch:
+                break
+            oldest_ts = min(_coerce_int(row[0]) or 0 for row in batch)
+            if oldest_ts <= int(start_ts or oldest_ts) or len(batch) < min(limit, self.max_ohlcv_limit) or oldest_ts in seen_oldest:
+                break
+            seen_oldest.add(oldest_ts)
+            before_ts = oldest_ts - 1
+        observations = self._normalize_geckoterminal_ohlcv_list(raw_rows, start_ts=start_ts, end_ts=end_ts)
+        missing = not observations
+        truncated = bool(end_ts is not None and observations and observations[-1]["timestamp"] < int(end_ts))
+        if missing:
+            warning = warning or "no_pool_ohlcv_rows"
+        elif truncated:
+            warning = warning or "price_path_incomplete"
+        return {
+            "token_address": token_address,
+            "pair_address": pair_address,
+            "pool_address": selected_pool_address,
+            "selected_pool_address": selected_pool_address,
+            "pool_resolver_source": pool_info.get("resolver_source"),
+            "pool_resolver_confidence": pool_info.get("resolver_confidence"),
+            "pool_candidates_seen": pool_info.get("pool_candidates_seen"),
+            "pool_resolution_status": pool_info.get("pool_resolution_status"),
+            "source_provider": self.provider,
+            "price_history_provider": self.provider,
+            "price_history_provider_status": self.provider_status,
+            "provider_bootstrap_ok": self.provider_status == "configured",
+            "provider_config_source": self.provider_config_source,
+            "provider_request_summary": request_summary,
+            "requested_start_ts": start_ts,
+            "requested_end_ts": end_ts,
+            "interval_sec": interval_sec,
+            "request_params": request_params,
+            "provider_row_count": len(raw_rows),
+            "price_path": observations,
+            "truncated": truncated,
+            "missing": missing,
+            "price_path_status": "missing" if missing else ("partial" if truncated else "complete"),
+            "warning": warning,
+            "http_status": http_status,
+            "provider_error_message": provider_error_message,
+            "provider_error_body": None,
+            "provider_error_payload": None,
+        }
 
     def fetch_price_path(
         self,
@@ -597,6 +986,17 @@ class PriceHistoryClient:
         limit: int = 256,
     ) -> dict[str, Any]:
         provider_config = self.provider_bootstrap()
+        if self.provider == "geckoterminal_pool_ohlcv":
+            return self._fetch_geckoterminal_price_path(
+                token_address=token_address,
+                pair_address=pair_address,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                interval_sec=interval_sec,
+                limit=limit,
+                provider_config=provider_config,
+            )
+
         request = build_price_history_request(
             provider_config,
             token_address=token_address,
@@ -615,7 +1015,6 @@ class PriceHistoryClient:
             "interval_sec": interval_sec,
             "limit": limit,
         }
-
         if not request.get("ok"):
             warning = request.get("warning") or provider_config.get("warning") or "price_history_provider_unconfigured"
             return {
@@ -673,13 +1072,11 @@ class PriceHistoryClient:
         if end_ts is not None and observations and observations[-1]["timestamp"] < int(end_ts):
             truncated = True
             warning = warning or "price_path_incomplete"
-
         status = "complete"
         if missing:
             status = "missing"
         elif truncated:
             status = "partial"
-
         return {
             "token_address": token_address,
             "pair_address": pair_address,
