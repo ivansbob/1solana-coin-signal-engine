@@ -128,27 +128,9 @@ Calibration candidates are now applied as real replay setting overrides. The har
 
 `trades.jsonl` must be analyzer-usable. Preferred output is a canonical buy/sell ledger. When replay writes a flattened historical lifecycle row instead, the analyzer must still treat that row as a first-class closed trade lifecycle rather than falling back to `positions.json` as the hidden primary source of truth. `positions.json` remains a support / fallback artifact, not the only way to recover closed trades.
 
-## Opened-but-unresolved lifecycle contract
-
-If replay reaches `position_opened`, it must continue to emit an analyzer-usable row in both `trades.jsonl` and `trade_feature_matrix.jsonl` even when historical exit resolution stays incomplete.
-
-This applies to cases such as:
-
-- `missing_price_path`
-- `truncated_price_path`
-- `partial_exit_without_full_exit`
-- `historical_exit_not_resolved`
-
-Required contract:
-
-- the position is considered opened
-- `trades.jsonl` contains a row for that lifecycle
-- `trade_feature_matrix.jsonl` contains a row for that lifecycle
-- `replay_data_status` is typically `historical_partial`
-- `replay_resolution_status` is `unresolved` or `partial`
-
-`positions.json` remains useful support output, but downstream analysis must not depend on it as the hidden primary source of truth for opened-but-unresolved lifecycles.
-
 ## Seed price-path backfill fallbacks
 
 Replay seed backfill now uses staged price-path recovery instead of a single OHLCV fetch. The collector first tries the requested launch window and interval, then can widen the window, retry on coarser intervals, retry without a pair binding, and shift the start timestamp backward by a prelaunch buffer. The selected result keeps compact provenance in `attempt_count`, `attempts`, `resolved_via_fallback`, and `fallback_mode` so missing paths remain diagnosable instead of collapsing into a generic `no_ohlcv_rows` outcome.
+
+Before those OHLCV attempts begin, the backfill layer now derives a start timestamp from the best available seed anchor. Preferred anchors are explicit `price_path_start_ts`, replay/open timestamps such as `entry_time` or `opened_at`, discovery-style timestamps such as `first_seen_at` / `discovered_at`, pair creation timestamps, cached block-time lookups, and finally signature-level `blockTime` values from `getSignaturesForAddress`. Successful and missing rows expose that provenance through `price_path_time_source`, `price_path_time_derived`, `price_path_anchor_field`, and `missing_required_fields`. That means sparse seed fixtures no longer stop at `attempt_count = 0` unless the upstream candidate is truly missing every usable time anchor.
+

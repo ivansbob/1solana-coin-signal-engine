@@ -70,6 +70,118 @@ def _iso_to_ts(value: Any) -> int | None:
         return None
 
 
+_START_TS_FIELD_PRIORITY = (
+    "price_path_start_ts",
+    "price_path_start",
+    "entry_time",
+    "entry_ts",
+    "opened_at",
+    "signal_timestamp",
+    "signal_time",
+    "created_at",
+    "created_ts",
+    "first_seen_at",
+    "first_seen_ts",
+    "launch_ts",
+    "launch_time",
+    "discovered_at",
+    "discovered_at_utc",
+    "discovered_ts",
+    "pair_created_at_ts",
+    "pair_created_ts",
+    "pair_created_at",
+)
+
+
+def _value_to_ts(value: Any) -> int | None:
+    if isinstance(value, (int, float)):
+        result = int(value)
+        return result if result > 0 else None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        try:
+            result = int(text)
+        except ValueError:
+            return None
+        return result if result > 0 else None
+    return _iso_to_ts(text)
+
+
+def _iter_timestamp_candidates(value: Any, *, prefix: str = "") -> list[tuple[str, int]]:
+    found: list[tuple[str, int]] = []
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if key in _START_TS_FIELD_PRIORITY:
+                ts = _value_to_ts(nested)
+                if ts is not None:
+                    found.append((path, ts))
+            if isinstance(nested, (dict, list, tuple)):
+                found.extend(_iter_timestamp_candidates(nested, prefix=path))
+    elif isinstance(value, (list, tuple)):
+        for idx, nested in enumerate(value[:32]):
+            path = f"{prefix}[{idx}]" if prefix else f"[{idx}]"
+            if isinstance(nested, (dict, list, tuple)):
+                found.extend(_iter_timestamp_candidates(nested, prefix=path))
+    return found
+
+
+def _preferred_start_ts(candidates: list[tuple[str, int]]) -> tuple[int | None, str | None]:
+    if not candidates:
+        return None, None
+    for field_name in _START_TS_FIELD_PRIORITY:
+        matches = [(path, ts) for path, ts in candidates if path.split(".")[-1] == field_name]
+        if matches:
+            path, ts = min(matches, key=lambda item: item[1])
+            return ts, path
+    path, ts = min(candidates, key=lambda item: item[1])
+    return ts, path
+
+
+def _candidate_start_context(cand: dict[str, Any], block_times: dict[int, int], signature_block_times: list[int] | None = None) -> dict[str, Any]:
+    candidate_fields = _iter_timestamp_candidates(cand)
+    ts, anchor_field = _preferred_start_ts(candidate_fields)
+    if ts is not None:
+        root_field = str(anchor_field or "").split(".")[-1]
+        return {
+            "start_ts": ts,
+            "price_path_time_source": "candidate_field",
+            "price_path_time_derived": root_field not in {"price_path_start_ts", "price_path_start"},
+            "price_path_anchor_field": anchor_field,
+            "missing_required_fields": [],
+        }
+
+    block_time_values = sorted({int(ts) for ts in block_times.values() if int(ts) > 0})
+    if block_time_values:
+        return {
+            "start_ts": block_time_values[0],
+            "price_path_time_source": "block_times",
+            "price_path_time_derived": True,
+            "price_path_anchor_field": "block_times",
+            "missing_required_fields": [],
+        }
+
+    signature_values = sorted({int(ts) for ts in (signature_block_times or []) if int(ts) > 0})
+    if signature_values:
+        return {
+            "start_ts": signature_values[0],
+            "price_path_time_source": "signature_block_time",
+            "price_path_time_derived": True,
+            "price_path_anchor_field": "signatures[].blockTime",
+            "missing_required_fields": list(_START_TS_FIELD_PRIORITY),
+        }
+
+    return {
+        "start_ts": None,
+        "price_path_time_source": None,
+        "price_path_time_derived": False,
+        "price_path_anchor_field": None,
+        "missing_required_fields": list(_START_TS_FIELD_PRIORITY),
+    }
+
+
 
 def fetch_signatures_for_address(client: SolanaRpcClient, address: str, *, limit: int, limiter: RateLimiter) -> list[dict[str, Any]]:
     limiter.acquire()
@@ -99,25 +211,21 @@ def fetch_block_times(client: SolanaRpcClient, slots: list[int], *, limiter: Rat
 
 
 
-def _candidate_start_ts(cand: dict[str, Any], block_times: dict[int, int]) -> int | None:
-    raw = cand.get("pair_created_at_ts") or cand.get("pair_created_ts")
-    if raw not in (None, ""):
-        try:
-            ts = int(raw)
-            if ts > 0:
-                return ts
-        except (TypeError, ValueError):
-            pass
-    iso_ts = _iso_to_ts(cand.get("pair_created_at"))
-    if iso_ts:
-        return iso_ts
-    if block_times:
-        return min(int(ts) for ts in block_times.values() if int(ts) > 0)
-    return None
 
-
-
-def _build_missing_price_path(token: str, pair_address: str | None, *, warning: str, start_ts: int | None = None, end_ts: int | None = None, interval_sec: int | None = None, attempts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def _build_missing_price_path(
+    token: str,
+    pair_address: str | None,
+    *,
+    warning: str,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
+    interval_sec: int | None = None,
+    attempts: list[dict[str, Any]] | None = None,
+    price_path_time_source: str | None = None,
+    price_path_time_derived: bool = False,
+    price_path_anchor_field: str | None = None,
+    missing_required_fields: list[str] | None = None,
+) -> dict[str, Any]:
     return {
         "token_address": token,
         "pair_address": pair_address,
@@ -135,6 +243,10 @@ def _build_missing_price_path(token: str, pair_address: str | None, *, warning: 
         "attempts": attempts or [],
         "resolved_via_fallback": False,
         "fallback_mode": None,
+        "price_path_time_source": price_path_time_source,
+        "price_path_time_derived": bool(price_path_time_derived),
+        "price_path_anchor_field": price_path_anchor_field,
+        "missing_required_fields": missing_required_fields or [],
     }
 
 
@@ -256,16 +368,33 @@ def _iter_price_path_attempts(token: str, pair_address: str | None, start_ts: in
 
 
 
-def _collect_price_paths(cand: dict[str, Any], block_times: dict[int, int], config: dict[str, Any]) -> list[dict[str, Any]]:
+def _collect_price_paths(
+    cand: dict[str, Any],
+    block_times: dict[int, int],
+    config: dict[str, Any],
+    *,
+    signature_block_times: list[int] | None = None,
+) -> list[dict[str, Any]]:
     bcfg = config.get("backfill", {})
     token = str(cand.get("token_address") or "")
     raw_pair_address = cand.get("pair_address")
     pair_address = str(raw_pair_address or "") or None
     if not bcfg.get("collect_price_paths", True):
         return []
-    start_ts = _candidate_start_ts(cand, block_times)
+    start_context = _candidate_start_context(cand, block_times, signature_block_times)
+    start_ts = start_context["start_ts"]
     if not start_ts:
-        return [_build_missing_price_path(token, pair_address, warning="price_path_start_ts_missing")]
+        return [
+            _build_missing_price_path(
+                token,
+                pair_address,
+                warning="price_path_start_ts_missing",
+                price_path_time_source=start_context.get("price_path_time_source"),
+                price_path_time_derived=bool(start_context.get("price_path_time_derived")),
+                price_path_anchor_field=start_context.get("price_path_anchor_field"),
+                missing_required_fields=list(start_context.get("missing_required_fields") or []),
+            )
+        ]
 
     min_points = max(int(bcfg.get("price_path_min_points", 2) or 2), 1)
     retry_attempts = max(int(bcfg.get("price_path_retry_attempts", 3) or 3), 1)
@@ -297,7 +426,18 @@ def _collect_price_paths(cand: dict[str, Any], block_times: dict[int, int], conf
 
     best = _choose_best_price_path(results, min_points=min_points)
     if best is None:
-        return [_build_missing_price_path(token, pair_address, warning="price_path_attempts_exhausted", start_ts=start_ts, attempts=attempt_summaries)]
+        return [
+            _build_missing_price_path(
+                token,
+                pair_address,
+                warning="price_path_attempts_exhausted",
+                start_ts=start_ts,
+                attempts=attempt_summaries,
+                price_path_time_source=start_context.get("price_path_time_source"),
+                price_path_time_derived=bool(start_context.get("price_path_time_derived")),
+                price_path_anchor_field=start_context.get("price_path_anchor_field"),
+            )
+        ]
 
     enriched = dict(best)
     best_summary = next((item for item in attempt_summaries if item["requested_start_ts"] == enriched.get("requested_start_ts") and item["requested_end_ts"] == enriched.get("requested_end_ts") and item["interval_sec"] == enriched.get("interval_sec") and item["pair_address"] == enriched.get("pair_address")), None)
@@ -312,6 +452,10 @@ def _collect_price_paths(cand: dict[str, Any], block_times: dict[int, int], conf
             "resolved_via_fallback": fallback_mode is not None,
             "fallback_mode": fallback_mode,
             "pair_address": enriched.get("pair_address"),
+            "price_path_time_source": start_context.get("price_path_time_source"),
+            "price_path_time_derived": bool(start_context.get("price_path_time_derived")),
+            "price_path_anchor_field": start_context.get("price_path_anchor_field"),
+            "missing_required_fields": list(start_context.get("missing_required_fields") or []),
         }
     )
     if _price_path_points(enriched) == 0:
@@ -332,14 +476,14 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
             rows.append(
                 {
                     "token_address": row["token_address"],
-                    "pair_address": row["pair_address"],
+                    "pair_address": row.get("pair_address", ""),
                     "signatures": [f"sig_{i}_{j}" for j in range(3)],
                     "transactions": [{"slot": 1_000_000 + i * 10 + j, "meta": {"fee": 5_000 + j}} for j in range(3)],
                     "block_times": {str(1_000_000 + i * 10 + j): start_ts + j for j in range(3)},
                     "buyer_snapshot": {"buyers_5m": 10 + i, "holders": 100 + i * 2},
                     "price_paths": [{
                         "token_address": row["token_address"],
-                        "pair_address": row["pair_address"],
+                        "pair_address": row.get("pair_address", ""),
                         "source_provider": "dry_run",
                         "price_path": [
                             {"timestamp": start_ts + j * 60, "offset_sec": j * 60, "price": round(1.0 + j * 0.02, 4)}
@@ -389,10 +533,17 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
             continue
         signatures_raw = fetch_signatures_for_address(client, token, limit=int(bcfg.get("max_signatures_per_address", 200)), limiter=limiter)
         signatures = [str(item.get("signature", "")) for item in signatures_raw if isinstance(item, dict) and item.get("signature")]
+        signature_block_times = sorted(
+            {
+                int(item.get("blockTime") or 0)
+                for item in signatures_raw
+                if isinstance(item, dict) and int(item.get("blockTime") or 0) > 0
+            }
+        )
         txs = fetch_transactions_for_signatures(client, signatures[:25], limiter=limiter)
         slots = [int(tx.get("slot", 0) or 0) for tx in txs if int(tx.get("slot", 0) or 0) > 0]
         block_times = fetch_block_times(client, slots, limiter=limiter)
-        price_paths = _collect_price_paths(cand, block_times, config)
+        price_paths = _collect_price_paths(cand, block_times, config, signature_block_times=signature_block_times)
         row = {
             "token_address": token,
             "pair_address": cand.get("pair_address", ""),

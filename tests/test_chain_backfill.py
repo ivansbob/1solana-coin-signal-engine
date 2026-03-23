@@ -18,6 +18,21 @@ class FakeRpcClient:
         return None
 
 
+class SignatureTimeOnlyRpcClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def get_signatures_for_address(self, address, limit=40):
+        return [{"signature": "sig-1", "blockTime": 1710000000}]
+
+    def _rpc(self, method, params):
+        if method == "getTransaction":
+            return None
+        if method == "getBlockTime":
+            return None
+        return None
+
+
 class FakePriceHistoryClient:
     def __init__(self, *args, **kwargs):
         pass
@@ -296,3 +311,83 @@ def test_collect_price_paths_emits_diagnostic_missing_row_after_all_attempts_fai
     assert result["attempt_count"] == 4
     assert len(result["attempts"]) == 4
     assert result["warning"] == "no_ohlcv_rows"
+
+
+def test_collect_price_paths_derives_start_ts_from_entry_time(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FakePriceHistoryClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "entry_time": "2026-03-16T00:00:00Z"},
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+
+    assert result["requested_start_ts"] == 1_773_619_200
+    assert result["price_path_time_source"] == "candidate_field"
+    assert result["price_path_time_derived"] is True
+    assert result["price_path_anchor_field"] == "entry_time"
+
+
+def test_collect_price_paths_derives_start_ts_from_first_seen_at(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FakePriceHistoryClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "first_seen_at": "2026-03-15T23:55:00Z"},
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+
+    assert result["requested_start_ts"] == 1_773_618_900
+    assert result["price_path_anchor_field"] == "first_seen_at"
+
+
+def test_build_chain_context_derives_start_ts_from_signature_block_time(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "SolanaRpcClient", SignatureTimeOnlyRpcClient)
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FakePriceHistoryClient)
+    rows = chain_backfill.build_chain_context(
+        [{"token_address": "tok_sig_only"}],
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+        dry_run=False,
+    )
+
+    price_path = rows[0]["price_paths"][0]
+    assert price_path["requested_start_ts"] == 1_710_000_000
+    assert price_path["price_path_time_source"] == "signature_block_time"
+    assert price_path["price_path_time_derived"] is True
+    assert price_path["price_path_anchor_field"] == "signatures[].blockTime"
+    assert price_path["attempt_count"] >= 1
+
+
+def test_collect_price_paths_emits_explained_missing_when_no_timestamp_sources_exist(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FakePriceHistoryClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair"},
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+
+    assert result["price_path"] == []
+    assert result["price_path_status"] == "missing"
+    assert result["warning"] == "price_path_start_ts_missing"
+    assert result["attempt_count"] == 0
+    assert "entry_time" in result["missing_required_fields"]
+    assert "first_seen_at" in result["missing_required_fields"]
+
+
+def test_collect_price_paths_runs_attempts_after_derived_start_ts(monkeypatch):
+    class TrackingClient(StagedPriceHistoryClient):
+        seen_start_ts = []
+
+        def fetch_price_path(self, **kwargs):
+            self.__class__.seen_start_ts.append(kwargs.get("start_ts"))
+            return super().fetch_price_path(**kwargs)
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", TrackingClient)
+    TrackingClient.seen_start_ts = []
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "entry_time": "2026-03-16T00:00:00Z"},
+        {},
+        _base_config(),
+    )[0]
+
+    assert result["attempt_count"] >= 1
+    assert TrackingClient.seen_start_ts
+    assert TrackingClient.seen_start_ts[0] == 1_773_619_200
