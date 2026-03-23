@@ -78,6 +78,14 @@ class PriceHistoryClient:
         interval_sec: int = 60,
         limit: int = 256,
     ) -> dict[str, Any]:
+        request_params = {
+            "token_address": token_address,
+            "pair_address": pair_address or None,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "interval_sec": interval_sec,
+            "limit": limit,
+        }
         payload = self._get(
             "price-history",
             {
@@ -93,6 +101,7 @@ class PriceHistoryClient:
         truncated = False
         missing = False
         warning = None
+        provider_row_count = 0
         if isinstance(payload, dict):
             if isinstance(payload.get("rows"), list):
                 rows = payload["rows"]
@@ -104,9 +113,14 @@ class PriceHistoryClient:
             missing = bool(payload.get("missing"))
             warning = payload.get("warning")
 
+        provider_row_count = len(rows)
         observations = self._normalize_observations(rows, start_ts=start_ts)
-        if not observations:
+        if provider_row_count > 0 and not observations:
+            warning = warning or "price_rows_unparseable"
             missing = True
+        elif not observations:
+            missing = True
+            warning = warning or "no_ohlcv_rows"
         if end_ts is not None and observations and observations[-1]["timestamp"] < int(end_ts):
             truncated = True
             warning = warning or "price_path_incomplete"
@@ -124,6 +138,8 @@ class PriceHistoryClient:
             "requested_start_ts": start_ts,
             "requested_end_ts": end_ts,
             "interval_sec": interval_sec,
+            "request_params": request_params,
+            "provider_row_count": provider_row_count,
             "price_path": observations,
             "truncated": truncated,
             "missing": missing,

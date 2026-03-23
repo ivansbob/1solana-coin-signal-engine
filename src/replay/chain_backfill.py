@@ -117,45 +117,208 @@ def _candidate_start_ts(cand: dict[str, Any], block_times: dict[int, int]) -> in
 
 
 
-def _build_missing_price_path(token: str, pair_address: str, *, warning: str) -> dict[str, Any]:
+def _build_missing_price_path(token: str, pair_address: str | None, *, warning: str, start_ts: int | None = None, end_ts: int | None = None, interval_sec: int | None = None, attempts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
         "token_address": token,
         "pair_address": pair_address,
         "source_provider": "price_history",
+        "requested_start_ts": start_ts,
+        "requested_end_ts": end_ts,
+        "interval_sec": interval_sec,
         "price_path": [],
         "truncated": False,
         "missing": True,
         "price_path_status": "missing",
         "warning": warning,
+        "attempt_count": len(attempts or []),
+        "attempt_strategy": "exhausted",
+        "attempts": attempts or [],
+        "resolved_via_fallback": False,
+        "fallback_mode": None,
     }
+
+
+
+def _price_path_points(row: dict[str, Any]) -> int:
+    return len(row.get("price_path") or []) if isinstance(row, dict) else 0
+
+
+
+def _price_path_rank(row: dict[str, Any], min_points: int) -> tuple[int, int, int]:
+    points = _price_path_points(row)
+    status = str(row.get("price_path_status") or "")
+    missing = bool(row.get("missing"))
+    if not missing and status == "complete" and points >= min_points:
+        base = 3
+    elif not missing and points > 0:
+        base = 2
+    else:
+        base = 1 if points > 0 else 0
+    truncated_bonus = 0 if bool(row.get("truncated")) else 1
+    return (base, points, truncated_bonus)
+
+
+
+def _choose_best_price_path(paths: list[dict[str, Any]], *, min_points: int) -> dict[str, Any] | None:
+    if not paths:
+        return None
+    return max(paths, key=lambda row: _price_path_rank(row, min_points))
+
+
+
+def _attempt_summary(path: dict[str, Any], *, strategy: str, fallback_mode: str | None) -> dict[str, Any]:
+    return {
+        "strategy": strategy,
+        "fallback_mode": fallback_mode,
+        "pair_address": path.get("pair_address"),
+        "requested_start_ts": path.get("requested_start_ts"),
+        "requested_end_ts": path.get("requested_end_ts"),
+        "interval_sec": path.get("interval_sec"),
+        "price_path_status": path.get("price_path_status"),
+        "missing": bool(path.get("missing")),
+        "warning": path.get("warning"),
+        "point_count": _price_path_points(path),
+    }
+
+
+
+def _iter_price_path_attempts(token: str, pair_address: str | None, start_ts: int, config: dict[str, Any]) -> list[dict[str, Any]]:
+    bcfg = config.get("backfill", {})
+    base_window = max(int(bcfg.get("price_path_window_sec", 900) or 900), 60)
+    max_window = max(int(bcfg.get("price_path_window_max_sec", base_window) or base_window), base_window)
+    base_interval = max(int(bcfg.get("price_interval_sec", 60) or 60), 1)
+    interval_fallbacks = [max(int(value or 0), 1) for value in (bcfg.get("price_interval_fallbacks") or [])]
+    multipliers = [max(int(value or 1), 1) for value in (bcfg.get("price_path_window_fallback_multipliers") or [])]
+    prelaunch_buffer_sec = max(int(bcfg.get("price_path_prelaunch_buffer_sec", 0) or 0), 0)
+    try_pairless = bool(bcfg.get("price_path_try_pairless", True))
+
+    intervals: list[int] = []
+    for value in [base_interval, *interval_fallbacks]:
+        if value not in intervals:
+            intervals.append(value)
+
+    windows: list[tuple[str, int]] = [("primary", base_window)]
+    for multiplier in multipliers:
+        window_sec = min(base_window * multiplier, max_window)
+        label = f"wider_window_x{multiplier}"
+        if (label, window_sec) not in windows:
+            windows.append((label, window_sec))
+
+    shifted_start = max(0, start_ts - prelaunch_buffer_sec) if prelaunch_buffer_sec > 0 else start_ts
+    attempts: list[dict[str, Any]] = []
+    seen: set[tuple[int, int, str | None, int]] = set()
+
+    def append_attempt(strategy: str, window_sec: int, interval_sec: int, attempt_pair: str | None, attempt_start_ts: int) -> None:
+        end_ts = attempt_start_ts + window_sec
+        key = (attempt_start_ts, end_ts, interval_sec, attempt_pair)
+        if key in seen:
+            return
+        seen.add(key)
+        attempts.append(
+            {
+                "strategy": strategy,
+                "start_ts": attempt_start_ts,
+                "end_ts": end_ts,
+                "window_sec": window_sec,
+                "interval_sec": interval_sec,
+                "pair_address": attempt_pair,
+            }
+        )
+
+    primary_pair = pair_address or None
+    append_attempt("primary", base_window, base_interval, primary_pair, start_ts)
+    for label, window_sec in windows[1:]:
+        append_attempt(label, window_sec, base_interval, primary_pair, start_ts)
+    for interval_sec in intervals[1:]:
+        append_attempt("coarser_interval", base_window, interval_sec, primary_pair, start_ts)
+    if try_pairless and primary_pair:
+        append_attempt("pairless", base_window, base_interval, None, start_ts)
+    if shifted_start != start_ts:
+        append_attempt("shifted_start", base_window, base_interval, primary_pair, shifted_start)
+
+    for label, window_sec in windows[1:]:
+        for interval_sec in intervals[1:]:
+            append_attempt(f"{label}_coarser_interval", window_sec, interval_sec, primary_pair, start_ts)
+    if try_pairless and primary_pair:
+        for label, window_sec in windows[1:]:
+            append_attempt(f"{label}_pairless", window_sec, base_interval, None, start_ts)
+        for interval_sec in intervals[1:]:
+            append_attempt("coarser_interval_pairless", base_window, interval_sec, None, start_ts)
+    if shifted_start != start_ts:
+        for label, window_sec in windows[1:]:
+            append_attempt(f"shifted_start_{label}", window_sec, base_interval, primary_pair, shifted_start)
+        for interval_sec in intervals[1:]:
+            append_attempt("shifted_start_coarser_interval", base_window, interval_sec, primary_pair, shifted_start)
+        if try_pairless and primary_pair:
+            append_attempt("shifted_start_pairless", base_window, base_interval, None, shifted_start)
+
+    return attempts
 
 
 
 def _collect_price_paths(cand: dict[str, Any], block_times: dict[int, int], config: dict[str, Any]) -> list[dict[str, Any]]:
     bcfg = config.get("backfill", {})
     token = str(cand.get("token_address") or "")
-    pair_address = str(cand.get("pair_address") or "")
+    raw_pair_address = cand.get("pair_address")
+    pair_address = str(raw_pair_address or "") or None
     if not bcfg.get("collect_price_paths", True):
         return []
     start_ts = _candidate_start_ts(cand, block_times)
     if not start_ts:
         return [_build_missing_price_path(token, pair_address, warning="price_path_start_ts_missing")]
-    window_sec = max(int(bcfg.get("price_path_window_sec", 900) or 900), 60)
-    interval_sec = max(int(bcfg.get("price_interval_sec", 60) or 60), 1)
+
+    min_points = max(int(bcfg.get("price_path_min_points", 2) or 2), 1)
+    retry_attempts = max(int(bcfg.get("price_path_retry_attempts", 3) or 3), 1)
+    limit = max(int(bcfg.get("price_path_limit", 256) or 256), 1)
     client = PriceHistoryClient(
         base_url=bcfg.get("price_history_base_url"),
         api_key=config.get("price_history_api_key"),
         provider=str(bcfg.get("price_provider") or "price_history"),
     )
-    path = client.fetch_price_path(
-        token_address=token,
-        pair_address=pair_address,
-        start_ts=start_ts,
-        end_ts=start_ts + window_sec,
-        interval_sec=interval_sec,
-        limit=max(int(bcfg.get("price_path_limit", 256) or 256), 1),
+
+    attempts = _iter_price_path_attempts(token, pair_address, start_ts, config)
+    if retry_attempts < len(attempts):
+        attempts = attempts[:retry_attempts]
+
+    attempt_summaries: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+    for attempt in attempts:
+        path = client.fetch_price_path(
+            token_address=token,
+            pair_address=attempt["pair_address"],
+            start_ts=attempt["start_ts"],
+            end_ts=attempt["end_ts"],
+            interval_sec=attempt["interval_sec"],
+            limit=limit,
+        )
+        summary = _attempt_summary(path, strategy=attempt["strategy"], fallback_mode=attempt["strategy"] if attempt["strategy"] != "primary" else None)
+        attempt_summaries.append(summary)
+        results.append(path)
+
+    best = _choose_best_price_path(results, min_points=min_points)
+    if best is None:
+        return [_build_missing_price_path(token, pair_address, warning="price_path_attempts_exhausted", start_ts=start_ts, attempts=attempt_summaries)]
+
+    enriched = dict(best)
+    best_summary = next((item for item in attempt_summaries if item["requested_start_ts"] == enriched.get("requested_start_ts") and item["requested_end_ts"] == enriched.get("requested_end_ts") and item["interval_sec"] == enriched.get("interval_sec") and item["pair_address"] == enriched.get("pair_address")), None)
+    fallback_mode = None
+    if best_summary and best_summary.get("strategy") != "primary":
+        fallback_mode = str(best_summary.get("strategy"))
+    enriched.update(
+        {
+            "attempt_count": len(attempt_summaries),
+            "attempt_strategy": "staged_fallback",
+            "attempts": attempt_summaries,
+            "resolved_via_fallback": fallback_mode is not None,
+            "fallback_mode": fallback_mode,
+            "pair_address": enriched.get("pair_address"),
+        }
     )
-    return [path]
+    if _price_path_points(enriched) == 0:
+        enriched["missing"] = True
+        enriched["price_path_status"] = "missing"
+        enriched["warning"] = enriched.get("warning") or "price_path_attempts_exhausted"
+    return [enriched]
 
 
 
@@ -209,7 +372,15 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
                 "token": token,
                 "limit": int(bcfg.get("max_signatures_per_address", 200)),
                 "price_window_sec": int(bcfg.get("price_path_window_sec", 900) or 900),
+                "price_window_max_sec": int(bcfg.get("price_path_window_max_sec", bcfg.get("price_path_window_sec", 900)) or bcfg.get("price_path_window_sec", 900)),
                 "price_interval_sec": int(bcfg.get("price_interval_sec", 60) or 60),
+                "price_interval_fallbacks": bcfg.get("price_interval_fallbacks") or [],
+                "price_path_window_fallback_multipliers": bcfg.get("price_path_window_fallback_multipliers") or [],
+                "price_path_prelaunch_buffer_sec": int(bcfg.get("price_path_prelaunch_buffer_sec", 0) or 0),
+                "price_path_try_pairless": bool(bcfg.get("price_path_try_pairless", True)),
+                "price_path_min_points": int(bcfg.get("price_path_min_points", 2) or 2),
+                "price_path_require_nonempty": bool(bcfg.get("price_path_require_nonempty", True)),
+                "price_path_retry_attempts": int(bcfg.get("price_path_retry_attempts", 3) or 3),
             },
         )
         cached = _cache_read(cache_dir, key) if bcfg.get("cache_enabled", True) else None
