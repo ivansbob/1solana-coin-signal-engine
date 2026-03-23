@@ -359,7 +359,7 @@ def build_price_history_request(
 
     headers = {
         "Accept": "application/json",
-        "User-Agent": "scse/0.1",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     }
     auth_header = str(provider_config.get("auth_header") or "").strip()
     api_key = str(provider_config.get("api_key") or "").strip()
@@ -479,7 +479,10 @@ class PriceHistoryClient:
         if not self.base_url:
             return {"rows": [], "missing": True, "warning": "price_history_provider_unconfigured"}
         query = {key: value for key, value in dict(params).items() if value not in (None, "")}
-        req_headers = {"Accept": "application/json", "User-Agent": "scse/0.1"}
+        req_headers = {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        }
         if self.provider.startswith("birdeye"):
             req_headers["x-chain"] = self.chain
         if self.auth_header and self.api_key:
@@ -492,13 +495,63 @@ class PriceHistoryClient:
         )
         try:
             with urlopen(req, timeout=20) as response:
-                return json.loads(response.read().decode("utf-8"))
+                raw_body = response.read().decode("utf-8", errors="replace")
+                payload = json.loads(raw_body)
+                if isinstance(payload, dict):
+                    payload.setdefault("http_status", int(getattr(response, "status", 200) or 200))
+                return payload
         except HTTPError as exc:
-            return {"rows": [], "missing": True, "warning": "provider_http_error", "http_status": int(exc.code)}
-        except (URLError, TimeoutError):
-            return {"rows": [], "missing": True, "warning": "provider_http_error"}
+            body_text = None
+            body_payload = None
+            provider_error_message = None
+            try:
+                raw = exc.read()
+                body_text = raw.decode("utf-8", errors="replace").strip() if raw else None
+                if body_text:
+                    try:
+                        body_payload = json.loads(body_text)
+                    except json.JSONDecodeError:
+                        body_payload = None
+            except Exception:
+                body_text = None
+                body_payload = None
+
+            if isinstance(body_payload, dict):
+                provider_error_message = (
+                    body_payload.get("message")
+                    or body_payload.get("error")
+                    or body_payload.get("warning")
+                )
+
+            return {
+                "rows": [],
+                "missing": True,
+                "warning": "provider_http_error",
+                "http_status": int(exc.code),
+                "provider_error_message": str(provider_error_message).strip() if provider_error_message else None,
+                "provider_error_body": body_text,
+                "provider_error_payload": body_payload if isinstance(body_payload, dict) else None,
+            }
+        except (URLError, TimeoutError) as exc:
+            return {
+                "rows": [],
+                "missing": True,
+                "warning": "provider_http_error",
+                "http_status": None,
+                "provider_error_message": str(exc),
+                "provider_error_body": None,
+                "provider_error_payload": None,
+            }
         except json.JSONDecodeError:
-            return {"rows": [], "missing": True, "warning": "provider_empty_payload"}
+            return {
+                "rows": [],
+                "missing": True,
+                "warning": "provider_empty_payload",
+                "http_status": 200,
+                "provider_error_message": "json_decode_error",
+                "provider_error_body": None,
+                "provider_error_payload": None,
+            }
 
     def _normalize_observations(self, rows: list[dict[str, Any]], *, start_ts: int | None) -> list[dict[str, Any]]:
         observations: list[dict[str, Any]] = []
@@ -508,6 +561,7 @@ class PriceHistoryClient:
             ts = _coerce_int(
                 row.get("timestamp")
                 or row.get("unixTime")
+                or row.get("unix_time")
                 or row.get("ts")
                 or row.get("time")
                 or row.get("t")
@@ -515,9 +569,9 @@ class PriceHistoryClient:
             price = _coerce_float(
                 row.get("price")
                 or row.get("close")
+                or row.get("c")
                 or row.get("close_price")
                 or row.get("value")
-                or row.get("c")
             )
             if ts is None or price is None:
                 continue
@@ -590,11 +644,19 @@ class PriceHistoryClient:
         truncated = False
         missing = False
         warning = None
+        http_status = None
+        provider_error_message = None
+        provider_error_body = None
+        provider_error_payload = None
         provider_row_count = len(rows)
         if isinstance(payload, dict):
             truncated = bool(payload.get("truncated"))
             missing = bool(payload.get("missing"))
             warning = payload.get("warning")
+            http_status = payload.get("http_status")
+            provider_error_message = payload.get("provider_error_message")
+            provider_error_body = payload.get("provider_error_body")
+            provider_error_payload = payload.get("provider_error_payload")
             data = payload.get("data")
             if warning is None and isinstance(data, dict):
                 warning = data.get("warning")
@@ -637,4 +699,8 @@ class PriceHistoryClient:
             "missing": missing,
             "price_path_status": status,
             "warning": warning,
+            "http_status": http_status,
+            "provider_error_message": provider_error_message,
+            "provider_error_body": provider_error_body,
+            "provider_error_payload": provider_error_payload,
         }
