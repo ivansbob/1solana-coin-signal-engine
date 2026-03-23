@@ -115,6 +115,18 @@ def _first_present(sources: list[dict[str, Any]], *fields: str) -> Any:
     return None
 
 
+
+def _first_present_by_field_priority(sources: list[dict[str, Any]], *fields: str) -> Any:
+    for field in fields:
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            value = source.get(field)
+            if value not in (None, "", [], {}):
+                return value
+    return None
+
+
 def _copy_if_present(target: dict[str, Any], source: dict[str, Any], *fields: str) -> None:
     for field in fields:
         if field not in target and source.get(field) not in (None, "", [], {}):
@@ -137,12 +149,12 @@ def build_backfill_candidates(loaded_inputs: dict[str, Any]) -> list[dict[str, A
         candidate.setdefault("token_address", token_address)
         candidate.setdefault("pair_address", payload.get("pair_address") or _canonical_pair(entry) or _canonical_pair(signal) or _canonical_pair(trade) or _canonical_pair(position) or _canonical_pair(scored))
 
-        replay_entry_time = _first_present(
+        replay_entry_time = _first_present_by_field_priority(
             sources,
             "price_path_start_ts",
+            "replay_entry_time",
             "entry_time",
             "entry_ts",
-            "replay_entry_time",
             "opened_at",
             "ts",
             "timestamp",

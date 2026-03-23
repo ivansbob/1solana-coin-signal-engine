@@ -435,6 +435,84 @@ def test_collect_price_paths_uses_replay_entry_time_from_upstream_context(monkey
     assert result["price_path_anchor_field"] == "replay_entry_time"
     assert result["price_path_time_source"] == "candidate_field"
 
+def test_chain_backfill_prefers_replay_entry_time_over_signature_block_time(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FakePriceHistoryClient)
+    result = chain_backfill._collect_price_paths(
+        {
+            "token_address": "tok",
+            "pair_address": "pair",
+            "replay_entry_time": "2026-03-16T00:00:00Z",
+            "signatures": [{"signature": "sig-1", "blockTime": 1710000000}],
+        },
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+
+    assert result["requested_start_ts"] == 1_773_619_200
+    assert result["price_path_anchor_field"] == "replay_entry_time"
+    assert result["time_anchor_preference_applied"] is True
+    assert result["time_anchor_discarded_candidates"][0]["field"] == "signatures[].blockTime"
+
+
+
+def test_chain_backfill_prefers_entry_time_over_signature_block_time(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FakePriceHistoryClient)
+    result = chain_backfill._collect_price_paths(
+        {
+            "token_address": "tok",
+            "pair_address": "pair",
+            "entry_time": "2026-03-16T00:00:00Z",
+            "signatures": [{"signature": "sig-1", "blockTime": 1710000000}],
+        },
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+
+    assert result["requested_start_ts"] == 1_773_619_200
+    assert result["price_path_anchor_field"] == "entry_time"
+    assert any(item["field"] == "signatures[].blockTime" for item in result["time_anchor_discarded_candidates"])
+
+
+
+def test_chain_backfill_records_discarded_signature_anchor_when_replay_entry_time_wins(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FakePriceHistoryClient)
+    result = chain_backfill._collect_price_paths(
+        {
+            "token_address": "tok",
+            "pair_address": "pair",
+            "replay_entry_time": "2026-03-16T00:00:00Z",
+            "signatures": [{"signature": "sig-1", "blockTime": 1710000000}],
+        },
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+
+    discarded = result["time_anchor_discarded_candidates"]
+    assert discarded
+    assert discarded[0]["field"] == "signatures[].blockTime"
+    assert discarded[0]["reason"] == "lower_preference_than_replay_entry_time"
+
+
+
+def test_chain_backfill_prefers_explicit_price_path_start_ts_over_all_other_sources(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FakePriceHistoryClient)
+    result = chain_backfill._collect_price_paths(
+        {
+            "token_address": "tok",
+            "pair_address": "pair",
+            "price_path_start_ts": 1700000000,
+            "replay_entry_time": "2026-03-16T00:00:00Z",
+            "signatures": [{"signature": "sig-1", "blockTime": 1710000000}],
+        },
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+
+    assert result["requested_start_ts"] == 1700000000
+    assert result["price_path_anchor_field"] == "price_path_start_ts"
+    assert result["time_anchor_preference_applied"] is True
+
+
 
 def test_collect_price_paths_uses_block_times_map_when_signatures_are_string_only(monkeypatch):
     monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FakePriceHistoryClient)

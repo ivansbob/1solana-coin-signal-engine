@@ -73,8 +73,8 @@ def _iso_to_ts(value: Any) -> int | None:
 _DEFAULT_TIME_ANCHOR_FIELD_PRIORITY = (
     "price_path_start_ts",
     "price_path_start",
-    "entry_time",
     "replay_entry_time",
+    "entry_time",
     "entry_ts",
     "opened_at",
     "signal_timestamp",
@@ -94,6 +94,8 @@ _DEFAULT_TIME_ANCHOR_FIELD_PRIORITY = (
     "first_trade_at",
     "event_time",
     "timestamp",
+    "block_times",
+    "signatures[].blockTime",
 )
 
 _TIME_ANCHOR_METADATA_EXCLUDE = {"signatures", "block_times", "transactions", "price_paths", "price_path"}
@@ -155,6 +157,70 @@ def _preferred_start_ts(candidates: list[tuple[str, int]], field_priority: tuple
             return ts, path
     path, ts = min(candidates, key=lambda item: item[1])
     return ts, path
+
+
+def _anchor_priority(field_name: str, field_priority: tuple[str, ...]) -> int:
+    try:
+        return field_priority.index(field_name)
+    except ValueError:
+        return len(field_priority) + 100
+
+
+def _anchor_field_from_path(path: str) -> str:
+    if path == "signatures[].blockTime":
+        return path
+    if path == "block_times":
+        return path
+    return path.split(".")[-1]
+
+
+def _build_time_anchor_candidate(
+    *,
+    source: str,
+    anchor_field: str,
+    ts: int,
+    derived: bool,
+    field_priority: tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        "source": source,
+        "anchor_field": anchor_field,
+        "resolved_ts": int(ts),
+        "derived": bool(derived),
+        "priority_rank": _anchor_priority(anchor_field, field_priority),
+    }
+
+
+
+def _choose_preferred_time_anchor(
+    candidates: list[dict[str, Any]],
+    *,
+    field_priority: tuple[str, ...],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], bool]:
+    if not candidates:
+        return None, [], False
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            int(item.get("priority_rank", len(field_priority) + 100)),
+            1 if bool(item.get("derived")) else 0,
+            int(item.get("resolved_ts") or 0),
+            str(item.get("anchor_field") or ""),
+            str(item.get("source") or ""),
+        ),
+    )
+    chosen = ordered[0]
+    discarded: list[dict[str, Any]] = []
+    for item in ordered[1:]:
+        discarded.append(
+            {
+                "source": item.get("source"),
+                "field": item.get("anchor_field"),
+                "ts": item.get("resolved_ts"),
+                "reason": f"lower_preference_than_{chosen.get('anchor_field')}",
+            }
+        )
+    return chosen, discarded, bool(discarded)
 
 
 def _top_level_time_candidates(cand: dict[str, Any], field_priority: tuple[str, ...]) -> list[tuple[str, int]]:
@@ -250,61 +316,118 @@ def _resolve_time_anchor(
     bcfg = config.get("backfill", {})
     field_priority = _time_anchor_field_priority(config)
     time_anchor_attempts: list[dict[str, Any]] = []
-    missing_required_fields = list(field_priority) + ["block_times", "signatures[].blockTime"]
+    missing_required_fields = list(field_priority)
+    for field in ("block_times", "signatures[].blockTime"):
+        if field not in missing_required_fields:
+            missing_required_fields.append(field)
     signature_hydration_attempted = False
     signature_hydration_count = 0
+    time_anchor_candidates: list[dict[str, Any]] = []
 
-    def _resolved_payload(source: str, anchor_field: str, ts: int, *, derived: bool, status: str = "resolved") -> dict[str, Any]:
-        time_anchor_attempts.append(
-            {
-                "source": source,
-                "anchor_field": anchor_field,
-                "resolved_ts": ts,
-                "status": status,
-            }
-        )
+    def _record_missing(source: str, anchor_field: str | None) -> None:
+        time_anchor_attempts.append({"source": source, "status": "missing", "anchor_field": anchor_field})
+
+    def _record_candidates(source: str, candidates: list[dict[str, Any]]) -> None:
+        if not candidates:
+            _record_missing(source, None)
+            return
+        for item in candidates:
+            payload = dict(item)
+            payload["status"] = "resolved"
+            time_anchor_attempts.append(payload)
+            time_anchor_candidates.append(item)
+
+    def _resolved_payload(chosen: dict[str, Any], discarded: list[dict[str, Any]], *, status: str = "resolved") -> dict[str, Any]:
+        ts = int(chosen["resolved_ts"])
         return {
             "start_ts": ts,
-            "price_path_time_source": source,
-            "price_path_time_derived": bool(derived),
-            "price_path_anchor_field": anchor_field,
+            "price_path_time_source": chosen.get("source"),
+            "price_path_time_derived": bool(chosen.get("derived")),
+            "price_path_anchor_field": chosen.get("anchor_field"),
             "time_anchor_resolution_status": status,
             "time_anchor_attempts": time_anchor_attempts,
             "missing_required_fields": [],
             "signature_hydration_attempted": signature_hydration_attempted,
             "signature_hydration_count": signature_hydration_count,
             "resolved_time_anchor_ts": ts,
+            "time_anchor_candidates": [dict(item) for item in sorted(time_anchor_candidates, key=lambda item: (int(item.get("priority_rank", len(field_priority) + 100)), int(item.get("resolved_ts") or 0), str(item.get("anchor_field") or "")))],
+            "time_anchor_discarded_candidates": discarded,
+            "time_anchor_preference_applied": bool(discarded),
         }
 
-    direct_candidates = _top_level_time_candidates(cand, field_priority)
-    ts, anchor_field = _preferred_start_ts(direct_candidates, field_priority)
-    if ts is not None and anchor_field is not None:
-        derived = anchor_field not in {"price_path_start_ts", "price_path_start"}
-        return _resolved_payload("candidate_field", anchor_field, ts, derived=derived)
-    time_anchor_attempts.append({"source": "candidate_field", "status": "missing", "anchor_field": None})
+    direct_candidates: list[dict[str, Any]] = []
+    for anchor_field, ts in _top_level_time_candidates(cand, field_priority):
+        direct_candidates.append(
+            _build_time_anchor_candidate(
+                source="candidate_field",
+                anchor_field=anchor_field,
+                ts=ts,
+                derived=anchor_field not in {"price_path_start_ts", "price_path_start"},
+                field_priority=field_priority,
+            )
+        )
+    _record_candidates("candidate_field", direct_candidates)
 
-    metadata_candidates = _nested_metadata_time_candidates(cand, field_priority)
-    ts, anchor_field = _preferred_start_ts(metadata_candidates, field_priority)
-    if ts is not None and anchor_field is not None:
-        return _resolved_payload("local_metadata", anchor_field, ts, derived=True)
-    time_anchor_attempts.append({"source": "local_metadata", "status": "missing", "anchor_field": None})
+    metadata_candidates: list[dict[str, Any]] = []
+    for path, ts in _nested_metadata_time_candidates(cand, field_priority):
+        metadata_candidates.append(
+            _build_time_anchor_candidate(
+                source="local_metadata",
+                anchor_field=_anchor_field_from_path(path),
+                ts=ts,
+                derived=True,
+                field_priority=field_priority,
+            )
+        )
+    _record_candidates("local_metadata", metadata_candidates)
 
     block_time_values = sorted({
         *[int(ts) for ts in _extract_block_time_values(cand.get("block_times")) if int(ts) > 0],
         *[int(ts) for ts in block_times.values() if int(ts) > 0],
     })
+    block_time_candidates: list[dict[str, Any]] = []
     if block_time_values and bool(bcfg.get("time_anchor_use_block_times", True)):
-        return _resolved_payload("block_times", "block_times", block_time_values[0], derived=True)
-    time_anchor_attempts.append({"source": "block_times", "status": "missing", "anchor_field": "block_times"})
+        block_time_candidates.append(
+            _build_time_anchor_candidate(
+                source="block_times",
+                anchor_field="block_times",
+                ts=block_time_values[0],
+                derived=True,
+                field_priority=field_priority,
+            )
+        )
+    _record_candidates("block_times", block_time_candidates)
 
     normalized_signatures = _normalize_signature_entries(cand.get("signatures"))
     embedded_signature_times = sorted({
         *[int(ts) for ts in _signature_time_candidates(normalized_signatures) if int(ts) > 0],
         *[int(ts) for ts in (signature_block_times or []) if int(ts) > 0],
     })
+    embedded_signature_candidates: list[dict[str, Any]] = []
     if embedded_signature_times:
-        return _resolved_payload("signature_block_time", "signatures[].blockTime", embedded_signature_times[0], derived=True)
-    time_anchor_attempts.append({"source": "signatures[].blockTime", "status": "missing", "anchor_field": "signatures[].blockTime"})
+        embedded_signature_candidates.append(
+            _build_time_anchor_candidate(
+                source="signature_block_time",
+                anchor_field="signatures[].blockTime",
+                ts=embedded_signature_times[0],
+                derived=True,
+                field_priority=field_priority,
+            )
+        )
+    if embedded_signature_candidates:
+        for item in embedded_signature_candidates:
+            payload = dict(item)
+            payload["status"] = "resolved"
+            time_anchor_attempts.append(payload)
+            time_anchor_candidates.append(item)
+    else:
+        time_anchor_attempts.append({"source": "signatures[].blockTime", "status": "missing", "anchor_field": "signatures[].blockTime"})
+
+    chosen, discarded, preference_applied = _choose_preferred_time_anchor(time_anchor_candidates, field_priority=field_priority)
+    if chosen is not None:
+        payload = _resolved_payload(chosen, discarded)
+        payload["time_anchor_preference_applied"] = preference_applied
+        return payload
 
     if bool(bcfg.get("time_anchor_use_signature_hydration", True)):
         hydration_limit = max(int(bcfg.get("time_anchor_signature_limit", 25) or 25), 1)
@@ -313,33 +436,49 @@ def _resolve_time_anchor(
         signature_hydration_count = len(signature_values)
         hydrated_times = _hydrate_signature_block_times(rpc_client, signature_values, limit=hydration_limit, limiter=limiter)
         if hydrated_times:
-            time_anchor_attempts.append({"source": "signature_block_time", "status": "resolved", "anchor_field": "signatures[].blockTime", "resolved_ts": hydrated_times[0]})
-            return {
-                "start_ts": hydrated_times[0],
-                "price_path_time_source": "signature_block_time",
-                "price_path_time_derived": True,
-                "price_path_anchor_field": "signatures[].blockTime",
-                "time_anchor_resolution_status": "resolved",
-                "time_anchor_attempts": time_anchor_attempts,
-                "missing_required_fields": [],
-                "signature_hydration_attempted": True,
-                "signature_hydration_count": signature_hydration_count,
-                "resolved_time_anchor_ts": hydrated_times[0],
-            }
+            hydrated_candidate = _build_time_anchor_candidate(
+                source="signature_block_time",
+                anchor_field="signatures[].blockTime",
+                ts=hydrated_times[0],
+                derived=True,
+                field_priority=field_priority,
+            )
+            hydrated_payload = dict(hydrated_candidate)
+            hydrated_payload["status"] = "resolved"
+            time_anchor_attempts.append(hydrated_payload)
+            time_anchor_candidates.append(hydrated_candidate)
+            chosen, discarded, preference_applied = _choose_preferred_time_anchor(time_anchor_candidates, field_priority=field_priority)
+            if chosen is not None:
+                payload = _resolved_payload(chosen, discarded)
+                payload["time_anchor_preference_applied"] = preference_applied
+                return payload
     time_anchor_attempts.append({"source": "signature_block_time", "status": "missing", "anchor_field": "signatures[].blockTime"})
 
-    token_fallback_candidates = _iter_timestamp_candidates(
+    token_fallback_candidates: list[dict[str, Any]] = []
+    for path, ts in _iter_timestamp_candidates(
         {
             "seed_metadata": cand.get("seed_metadata"),
             "discovery_context": cand.get("discovery_context"),
             "replay_context": cand.get("replay_context"),
         },
         field_priority=field_priority,
-    )
-    ts, anchor_field = _preferred_start_ts(token_fallback_candidates, field_priority)
-    if ts is not None and anchor_field is not None:
-        return _resolved_payload("token_first_seen", anchor_field, ts, derived=True)
-    time_anchor_attempts.append({"source": "token_first_seen", "status": "missing", "anchor_field": None})
+    ):
+        token_fallback_candidates.append(
+            _build_time_anchor_candidate(
+                source="token_first_seen",
+                anchor_field=_anchor_field_from_path(path),
+                ts=ts,
+                derived=True,
+                field_priority=field_priority,
+            )
+        )
+    _record_candidates("token_first_seen", token_fallback_candidates)
+
+    chosen, discarded, preference_applied = _choose_preferred_time_anchor(time_anchor_candidates, field_priority=field_priority)
+    if chosen is not None:
+        payload = _resolved_payload(chosen, discarded)
+        payload["time_anchor_preference_applied"] = preference_applied
+        return payload
 
     return {
         "start_ts": None,
@@ -352,6 +491,9 @@ def _resolve_time_anchor(
         "signature_hydration_attempted": signature_hydration_attempted,
         "signature_hydration_count": signature_hydration_count,
         "resolved_time_anchor_ts": None,
+        "time_anchor_candidates": [],
+        "time_anchor_discarded_candidates": [],
+        "time_anchor_preference_applied": False,
     }
 
 
@@ -408,6 +550,9 @@ def _build_missing_price_path(
     signature_hydration_attempted: bool = False,
     signature_hydration_count: int = 0,
     resolved_time_anchor_ts: int | None = None,
+    time_anchor_candidates: list[dict[str, Any]] | None = None,
+    time_anchor_discarded_candidates: list[dict[str, Any]] | None = None,
+    time_anchor_preference_applied: bool = False,
 ) -> dict[str, Any]:
     return {
         "token_address": token,
@@ -440,6 +585,9 @@ def _build_missing_price_path(
         "signature_hydration_attempted": bool(signature_hydration_attempted),
         "signature_hydration_count": int(signature_hydration_count or 0),
         "resolved_time_anchor_ts": resolved_time_anchor_ts,
+        "time_anchor_candidates": time_anchor_candidates or [],
+        "time_anchor_discarded_candidates": time_anchor_discarded_candidates or [],
+        "time_anchor_preference_applied": bool(time_anchor_preference_applied),
     }
 
 
@@ -654,6 +802,9 @@ def _collect_price_paths(
                 signature_hydration_attempted=bool(start_context.get("signature_hydration_attempted")),
                 signature_hydration_count=int(start_context.get("signature_hydration_count") or 0),
                 resolved_time_anchor_ts=start_context.get("resolved_time_anchor_ts"),
+                time_anchor_candidates=list(start_context.get("time_anchor_candidates") or []),
+                time_anchor_discarded_candidates=list(start_context.get("time_anchor_discarded_candidates") or []),
+                time_anchor_preference_applied=bool(start_context.get("time_anchor_preference_applied")),
             )
         ]
 
@@ -745,6 +896,9 @@ def _collect_price_paths(
                 signature_hydration_attempted=bool(start_context.get("signature_hydration_attempted")),
                 signature_hydration_count=int(start_context.get("signature_hydration_count") or 0),
                 resolved_time_anchor_ts=start_context.get("resolved_time_anchor_ts"),
+                time_anchor_candidates=list(start_context.get("time_anchor_candidates") or []),
+                time_anchor_discarded_candidates=list(start_context.get("time_anchor_discarded_candidates") or []),
+                time_anchor_preference_applied=bool(start_context.get("time_anchor_preference_applied")),
             )
         ]
 
@@ -775,6 +929,9 @@ def _collect_price_paths(
             "signature_hydration_attempted": bool(start_context.get("signature_hydration_attempted")),
             "signature_hydration_count": int(start_context.get("signature_hydration_count") or 0),
             "resolved_time_anchor_ts": start_context.get("resolved_time_anchor_ts"),
+            "time_anchor_candidates": list(start_context.get("time_anchor_candidates") or []),
+            "time_anchor_discarded_candidates": list(start_context.get("time_anchor_discarded_candidates") or []),
+            "time_anchor_preference_applied": bool(start_context.get("time_anchor_preference_applied")),
         }
     )
     if _price_path_points(enriched) == 0:
@@ -828,6 +985,9 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
                         "time_anchor_resolution_status": "resolved",
                         "time_anchor_attempts": [{"source": "candidate_field", "status": "resolved", "anchor_field": "price_path_start_ts", "resolved_ts": start_ts}],
                         "resolved_time_anchor_ts": start_ts,
+                        "time_anchor_candidates": [{"source": "candidate_field", "anchor_field": "price_path_start_ts", "resolved_ts": start_ts, "derived": False, "priority_rank": 0}],
+                        "time_anchor_discarded_candidates": [],
+                        "time_anchor_preference_applied": False,
                     }],
                 }
             )

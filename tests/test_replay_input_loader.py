@@ -104,3 +104,25 @@ def test_replay_loader_keeps_sparse_seed_compatible_with_backfill_enrichment_con
     assert candidates[0]["token_address"] == "tok_sparse"
     assert candidates[0]["signatures"] == ["sig-1"]
     assert candidates[0]["block_times"] == {"sig-1": 1710000000}
+
+
+def test_replay_input_loader_prefers_replay_entry_time_over_entry_time_for_backfill_candidates():
+    loaded_inputs = {
+        "token_inputs": {
+            "tok_pref": {
+                "token_address": "tok_pref",
+                "pair_address": "pair_pref",
+                "scored_rows": [],
+                "entry_candidates": [{"token_address": "tok_pref", "entry_time": "2026-03-15T00:00:00Z"}],
+                "signals": [{"token_address": "tok_pref", "replay_entry_time": "2026-03-16T00:00:00Z"}],
+                "trades": [],
+                "positions": [],
+                "price_paths": [],
+            }
+        }
+    }
+
+    candidates = build_backfill_candidates(loaded_inputs)
+
+    assert candidates[0]["replay_entry_time"] == "2026-03-16T00:00:00Z"
+    assert candidates[0]["entry_time"] == "2026-03-15T00:00:00Z"
