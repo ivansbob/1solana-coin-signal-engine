@@ -70,10 +70,11 @@ def _iso_to_ts(value: Any) -> int | None:
         return None
 
 
-_START_TS_FIELD_PRIORITY = (
+_DEFAULT_TIME_ANCHOR_FIELD_PRIORITY = (
     "price_path_start_ts",
     "price_path_start",
     "entry_time",
+    "replay_entry_time",
     "entry_ts",
     "opened_at",
     "signal_timestamp",
@@ -90,7 +91,23 @@ _START_TS_FIELD_PRIORITY = (
     "pair_created_at_ts",
     "pair_created_ts",
     "pair_created_at",
+    "first_trade_at",
+    "event_time",
+    "timestamp",
 )
+
+_TIME_ANCHOR_METADATA_EXCLUDE = {"signatures", "block_times", "transactions", "price_paths", "price_path"}
+
+
+def _time_anchor_field_priority(config: dict[str, Any]) -> tuple[str, ...]:
+    bcfg = config.get("backfill", {})
+    configured = bcfg.get("time_anchor_field_priority") or _DEFAULT_TIME_ANCHOR_FIELD_PRIORITY
+    fields: list[str] = []
+    for value in configured:
+        field = str(value or "").strip()
+        if field and field not in fields:
+            fields.append(field)
+    return tuple(fields or _DEFAULT_TIME_ANCHOR_FIELD_PRIORITY)
 
 
 def _value_to_ts(value: Any) -> int | None:
@@ -109,29 +126,29 @@ def _value_to_ts(value: Any) -> int | None:
     return _iso_to_ts(text)
 
 
-def _iter_timestamp_candidates(value: Any, *, prefix: str = "") -> list[tuple[str, int]]:
+def _iter_timestamp_candidates(value: Any, *, field_priority: tuple[str, ...], prefix: str = "") -> list[tuple[str, int]]:
     found: list[tuple[str, int]] = []
     if isinstance(value, dict):
         for key, nested in value.items():
             path = f"{prefix}.{key}" if prefix else str(key)
-            if key in _START_TS_FIELD_PRIORITY:
+            if key in field_priority:
                 ts = _value_to_ts(nested)
                 if ts is not None:
                     found.append((path, ts))
             if isinstance(nested, (dict, list, tuple)):
-                found.extend(_iter_timestamp_candidates(nested, prefix=path))
+                found.extend(_iter_timestamp_candidates(nested, field_priority=field_priority, prefix=path))
     elif isinstance(value, (list, tuple)):
         for idx, nested in enumerate(value[:32]):
             path = f"{prefix}[{idx}]" if prefix else f"[{idx}]"
             if isinstance(nested, (dict, list, tuple)):
-                found.extend(_iter_timestamp_candidates(nested, prefix=path))
+                found.extend(_iter_timestamp_candidates(nested, field_priority=field_priority, prefix=path))
     return found
 
 
-def _preferred_start_ts(candidates: list[tuple[str, int]]) -> tuple[int | None, str | None]:
+def _preferred_start_ts(candidates: list[tuple[str, int]], field_priority: tuple[str, ...]) -> tuple[int | None, str | None]:
     if not candidates:
         return None, None
-    for field_name in _START_TS_FIELD_PRIORITY:
+    for field_name in field_priority:
         matches = [(path, ts) for path, ts in candidates if path.split(".")[-1] == field_name]
         if matches:
             path, ts = min(matches, key=lambda item: item[1])
@@ -140,47 +157,202 @@ def _preferred_start_ts(candidates: list[tuple[str, int]]) -> tuple[int | None, 
     return ts, path
 
 
-def _candidate_start_context(cand: dict[str, Any], block_times: dict[int, int], signature_block_times: list[int] | None = None) -> dict[str, Any]:
-    candidate_fields = _iter_timestamp_candidates(cand)
-    ts, anchor_field = _preferred_start_ts(candidate_fields)
-    if ts is not None:
-        root_field = str(anchor_field or "").split(".")[-1]
+def _top_level_time_candidates(cand: dict[str, Any], field_priority: tuple[str, ...]) -> list[tuple[str, int]]:
+    found: list[tuple[str, int]] = []
+    for field in field_priority:
+        if field not in cand:
+            continue
+        ts = _value_to_ts(cand.get(field))
+        if ts is not None:
+            found.append((field, ts))
+    return found
+
+
+def _nested_metadata_time_candidates(cand: dict[str, Any], field_priority: tuple[str, ...]) -> list[tuple[str, int]]:
+    found: list[tuple[str, int]] = []
+    for key, value in cand.items():
+        if key in _TIME_ANCHOR_METADATA_EXCLUDE or key in field_priority:
+            continue
+        if isinstance(value, (dict, list, tuple)):
+            found.extend(_iter_timestamp_candidates(value, field_priority=field_priority, prefix=str(key)))
+    return found
+
+
+def _extract_block_time_values(value: Any) -> list[int]:
+    values: list[int] = []
+    if isinstance(value, dict):
+        for nested in value.values():
+            ts = _value_to_ts(nested)
+            if ts is not None:
+                values.append(ts)
+    elif isinstance(value, list):
+        for nested in value:
+            ts = _value_to_ts(nested)
+            if ts is not None:
+                values.append(ts)
+    return values
+
+
+def _normalize_signature_entries(signatures: Any) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    if not isinstance(signatures, list):
+        return output
+    for item in signatures:
+        if isinstance(item, str):
+            sig = item.strip()
+            if sig:
+                output.append({"signature": sig})
+            continue
+        if not isinstance(item, dict):
+            continue
+        signature = str(item.get("signature") or item.get("sig") or item.get("id") or "").strip()
+        if not signature:
+            continue
+        normalized = dict(item)
+        normalized["signature"] = signature
+        output.append(normalized)
+    return output
+
+
+def _signature_time_candidates(signatures: list[dict[str, Any]]) -> list[int]:
+    values: list[int] = []
+    for item in signatures:
+        ts = _value_to_ts(item.get("blockTime") if isinstance(item, dict) else None)
+        if ts is not None:
+            values.append(ts)
+    return values
+
+
+def _hydrate_signature_block_times(
+    client: SolanaRpcClient | None,
+    signatures: list[str],
+    *,
+    limit: int,
+    limiter: RateLimiter | None,
+) -> list[int]:
+    if client is None or limiter is None or not signatures or limit <= 0:
+        return []
+    txs = fetch_transactions_for_signatures(client, signatures[:limit], limiter=limiter)
+    slots = [int(tx.get("slot", 0) or 0) for tx in txs if int(tx.get("slot", 0) or 0) > 0]
+    block_times = fetch_block_times(client, slots, limiter=limiter)
+    return sorted({int(ts) for ts in block_times.values() if int(ts) > 0})
+
+
+def _resolve_time_anchor(
+    cand: dict[str, Any],
+    block_times: dict[int, int],
+    config: dict[str, Any],
+    *,
+    signature_block_times: list[int] | None = None,
+    rpc_client: SolanaRpcClient | None = None,
+    limiter: RateLimiter | None = None,
+) -> dict[str, Any]:
+    bcfg = config.get("backfill", {})
+    field_priority = _time_anchor_field_priority(config)
+    time_anchor_attempts: list[dict[str, Any]] = []
+    missing_required_fields = list(field_priority) + ["block_times", "signatures[].blockTime"]
+    signature_hydration_attempted = False
+    signature_hydration_count = 0
+
+    def _resolved_payload(source: str, anchor_field: str, ts: int, *, derived: bool, status: str = "resolved") -> dict[str, Any]:
+        time_anchor_attempts.append(
+            {
+                "source": source,
+                "anchor_field": anchor_field,
+                "resolved_ts": ts,
+                "status": status,
+            }
+        )
         return {
             "start_ts": ts,
-            "price_path_time_source": "candidate_field",
-            "price_path_time_derived": root_field not in {"price_path_start_ts", "price_path_start"},
+            "price_path_time_source": source,
+            "price_path_time_derived": bool(derived),
             "price_path_anchor_field": anchor_field,
+            "time_anchor_resolution_status": status,
+            "time_anchor_attempts": time_anchor_attempts,
             "missing_required_fields": [],
+            "signature_hydration_attempted": signature_hydration_attempted,
+            "signature_hydration_count": signature_hydration_count,
+            "resolved_time_anchor_ts": ts,
         }
 
-    block_time_values = sorted({int(ts) for ts in block_times.values() if int(ts) > 0})
-    if block_time_values:
-        return {
-            "start_ts": block_time_values[0],
-            "price_path_time_source": "block_times",
-            "price_path_time_derived": True,
-            "price_path_anchor_field": "block_times",
-            "missing_required_fields": [],
-        }
+    direct_candidates = _top_level_time_candidates(cand, field_priority)
+    ts, anchor_field = _preferred_start_ts(direct_candidates, field_priority)
+    if ts is not None and anchor_field is not None:
+        derived = anchor_field not in {"price_path_start_ts", "price_path_start"}
+        return _resolved_payload("candidate_field", anchor_field, ts, derived=derived)
+    time_anchor_attempts.append({"source": "candidate_field", "status": "missing", "anchor_field": None})
 
-    signature_values = sorted({int(ts) for ts in (signature_block_times or []) if int(ts) > 0})
-    if signature_values:
-        return {
-            "start_ts": signature_values[0],
-            "price_path_time_source": "signature_block_time",
-            "price_path_time_derived": True,
-            "price_path_anchor_field": "signatures[].blockTime",
-            "missing_required_fields": list(_START_TS_FIELD_PRIORITY),
-        }
+    metadata_candidates = _nested_metadata_time_candidates(cand, field_priority)
+    ts, anchor_field = _preferred_start_ts(metadata_candidates, field_priority)
+    if ts is not None and anchor_field is not None:
+        return _resolved_payload("local_metadata", anchor_field, ts, derived=True)
+    time_anchor_attempts.append({"source": "local_metadata", "status": "missing", "anchor_field": None})
+
+    block_time_values = sorted({
+        *[int(ts) for ts in _extract_block_time_values(cand.get("block_times")) if int(ts) > 0],
+        *[int(ts) for ts in block_times.values() if int(ts) > 0],
+    })
+    if block_time_values and bool(bcfg.get("time_anchor_use_block_times", True)):
+        return _resolved_payload("block_times", "block_times", block_time_values[0], derived=True)
+    time_anchor_attempts.append({"source": "block_times", "status": "missing", "anchor_field": "block_times"})
+
+    normalized_signatures = _normalize_signature_entries(cand.get("signatures"))
+    embedded_signature_times = sorted({
+        *[int(ts) for ts in _signature_time_candidates(normalized_signatures) if int(ts) > 0],
+        *[int(ts) for ts in (signature_block_times or []) if int(ts) > 0],
+    })
+    if embedded_signature_times:
+        return _resolved_payload("signature_block_time", "signatures[].blockTime", embedded_signature_times[0], derived=True)
+    time_anchor_attempts.append({"source": "signatures[].blockTime", "status": "missing", "anchor_field": "signatures[].blockTime"})
+
+    if bool(bcfg.get("time_anchor_use_signature_hydration", True)):
+        hydration_limit = max(int(bcfg.get("time_anchor_signature_limit", 25) or 25), 1)
+        signature_values = [item["signature"] for item in normalized_signatures if str(item.get("signature") or "").strip()][:hydration_limit]
+        signature_hydration_attempted = bool(signature_values)
+        signature_hydration_count = len(signature_values)
+        hydrated_times = _hydrate_signature_block_times(rpc_client, signature_values, limit=hydration_limit, limiter=limiter)
+        if hydrated_times:
+            time_anchor_attempts.append({"source": "signature_block_time", "status": "resolved", "anchor_field": "signatures[].blockTime", "resolved_ts": hydrated_times[0]})
+            return {
+                "start_ts": hydrated_times[0],
+                "price_path_time_source": "signature_block_time",
+                "price_path_time_derived": True,
+                "price_path_anchor_field": "signatures[].blockTime",
+                "time_anchor_resolution_status": "resolved",
+                "time_anchor_attempts": time_anchor_attempts,
+                "missing_required_fields": [],
+                "signature_hydration_attempted": True,
+                "signature_hydration_count": signature_hydration_count,
+                "resolved_time_anchor_ts": hydrated_times[0],
+            }
+    time_anchor_attempts.append({"source": "signature_block_time", "status": "missing", "anchor_field": "signatures[].blockTime"})
+
+    token_fallback_candidates = _iter_timestamp_candidates(
+        {
+            "seed_metadata": cand.get("seed_metadata"),
+            "discovery_context": cand.get("discovery_context"),
+            "replay_context": cand.get("replay_context"),
+        },
+        field_priority=field_priority,
+    )
+    ts, anchor_field = _preferred_start_ts(token_fallback_candidates, field_priority)
+    if ts is not None and anchor_field is not None:
+        return _resolved_payload("token_first_seen", anchor_field, ts, derived=True)
+    time_anchor_attempts.append({"source": "token_first_seen", "status": "missing", "anchor_field": None})
 
     return {
         "start_ts": None,
         "price_path_time_source": None,
         "price_path_time_derived": False,
         "price_path_anchor_field": None,
-        "missing_required_fields": list(_START_TS_FIELD_PRIORITY),
+        "time_anchor_resolution_status": "missing",
+        "time_anchor_attempts": time_anchor_attempts,
+        "missing_required_fields": missing_required_fields,
+        "signature_hydration_attempted": signature_hydration_attempted,
+        "signature_hydration_count": signature_hydration_count,
+        "resolved_time_anchor_ts": None,
     }
-
 
 
 def fetch_signatures_for_address(client: SolanaRpcClient, address: str, *, limit: int, limiter: RateLimiter) -> list[dict[str, Any]]:
@@ -225,6 +397,11 @@ def _build_missing_price_path(
     price_path_time_derived: bool = False,
     price_path_anchor_field: str | None = None,
     missing_required_fields: list[str] | None = None,
+    time_anchor_resolution_status: str | None = None,
+    time_anchor_attempts: list[dict[str, Any]] | None = None,
+    signature_hydration_attempted: bool = False,
+    signature_hydration_count: int = 0,
+    resolved_time_anchor_ts: int | None = None,
 ) -> dict[str, Any]:
     return {
         "token_address": token,
@@ -247,8 +424,12 @@ def _build_missing_price_path(
         "price_path_time_derived": bool(price_path_time_derived),
         "price_path_anchor_field": price_path_anchor_field,
         "missing_required_fields": missing_required_fields or [],
+        "time_anchor_resolution_status": time_anchor_resolution_status,
+        "time_anchor_attempts": time_anchor_attempts or [],
+        "signature_hydration_attempted": bool(signature_hydration_attempted),
+        "signature_hydration_count": int(signature_hydration_count or 0),
+        "resolved_time_anchor_ts": resolved_time_anchor_ts,
     }
-
 
 
 def _price_path_points(row: dict[str, Any]) -> int:
@@ -374,6 +555,8 @@ def _collect_price_paths(
     config: dict[str, Any],
     *,
     signature_block_times: list[int] | None = None,
+    rpc_client: SolanaRpcClient | None = None,
+    limiter: RateLimiter | None = None,
 ) -> list[dict[str, Any]]:
     bcfg = config.get("backfill", {})
     token = str(cand.get("token_address") or "")
@@ -381,7 +564,14 @@ def _collect_price_paths(
     pair_address = str(raw_pair_address or "") or None
     if not bcfg.get("collect_price_paths", True):
         return []
-    start_context = _candidate_start_context(cand, block_times, signature_block_times)
+    start_context = _resolve_time_anchor(
+        cand,
+        block_times,
+        config,
+        signature_block_times=signature_block_times,
+        rpc_client=rpc_client,
+        limiter=limiter,
+    )
     start_ts = start_context["start_ts"]
     if not start_ts:
         return [
@@ -393,6 +583,11 @@ def _collect_price_paths(
                 price_path_time_derived=bool(start_context.get("price_path_time_derived")),
                 price_path_anchor_field=start_context.get("price_path_anchor_field"),
                 missing_required_fields=list(start_context.get("missing_required_fields") or []),
+                time_anchor_resolution_status=start_context.get("time_anchor_resolution_status"),
+                time_anchor_attempts=list(start_context.get("time_anchor_attempts") or []),
+                signature_hydration_attempted=bool(start_context.get("signature_hydration_attempted")),
+                signature_hydration_count=int(start_context.get("signature_hydration_count") or 0),
+                resolved_time_anchor_ts=start_context.get("resolved_time_anchor_ts"),
             )
         ]
 
@@ -436,6 +631,12 @@ def _collect_price_paths(
                 price_path_time_source=start_context.get("price_path_time_source"),
                 price_path_time_derived=bool(start_context.get("price_path_time_derived")),
                 price_path_anchor_field=start_context.get("price_path_anchor_field"),
+                missing_required_fields=list(start_context.get("missing_required_fields") or []),
+                time_anchor_resolution_status=start_context.get("time_anchor_resolution_status"),
+                time_anchor_attempts=list(start_context.get("time_anchor_attempts") or []),
+                signature_hydration_attempted=bool(start_context.get("signature_hydration_attempted")),
+                signature_hydration_count=int(start_context.get("signature_hydration_count") or 0),
+                resolved_time_anchor_ts=start_context.get("resolved_time_anchor_ts"),
             )
         ]
 
@@ -456,6 +657,11 @@ def _collect_price_paths(
             "price_path_time_derived": bool(start_context.get("price_path_time_derived")),
             "price_path_anchor_field": start_context.get("price_path_anchor_field"),
             "missing_required_fields": list(start_context.get("missing_required_fields") or []),
+            "time_anchor_resolution_status": start_context.get("time_anchor_resolution_status"),
+            "time_anchor_attempts": list(start_context.get("time_anchor_attempts") or []),
+            "signature_hydration_attempted": bool(start_context.get("signature_hydration_attempted")),
+            "signature_hydration_count": int(start_context.get("signature_hydration_count") or 0),
+            "resolved_time_anchor_ts": start_context.get("resolved_time_anchor_ts"),
         }
     )
     if _price_path_points(enriched) == 0:
@@ -463,6 +669,16 @@ def _collect_price_paths(
         enriched["price_path_status"] = "missing"
         enriched["warning"] = enriched.get("warning") or "price_path_attempts_exhausted"
     return [enriched]
+
+
+def _time_anchor_cache_fingerprint(cand: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    fields = _time_anchor_field_priority(config)
+    payload: dict[str, Any] = {field: cand.get(field) for field in fields if cand.get(field) not in (None, "", [], {})}
+    for key in ("signatures", "block_times", "seed_metadata", "replay_context", "discovery_context"):
+        value = cand.get(key)
+        if value not in (None, "", [], {}):
+            payload[key] = value
+    return payload
 
 
 
@@ -493,6 +709,12 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
                         "missing": False,
                         "price_path_status": "complete",
                         "warning": None,
+                        "price_path_time_source": "candidate_field",
+                        "price_path_anchor_field": "price_path_start_ts",
+                        "price_path_time_derived": False,
+                        "time_anchor_resolution_status": "resolved",
+                        "time_anchor_attempts": [{"source": "candidate_field", "status": "resolved", "anchor_field": "price_path_start_ts", "resolved_ts": start_ts}],
+                        "resolved_time_anchor_ts": start_ts,
                     }],
                 }
             )
@@ -525,25 +747,52 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
                 "price_path_min_points": int(bcfg.get("price_path_min_points", 2) or 2),
                 "price_path_require_nonempty": bool(bcfg.get("price_path_require_nonempty", True)),
                 "price_path_retry_attempts": int(bcfg.get("price_path_retry_attempts", 3) or 3),
+                "enrich_time_anchor": bool(bcfg.get("enrich_time_anchor", True)),
+                "time_anchor_field_priority": list(_time_anchor_field_priority(config)),
+                "time_anchor_use_block_times": bool(bcfg.get("time_anchor_use_block_times", True)),
+                "time_anchor_use_signature_hydration": bool(bcfg.get("time_anchor_use_signature_hydration", True)),
+                "time_anchor_signature_limit": int(bcfg.get("time_anchor_signature_limit", 25) or 25),
+                "time_anchor_allow_replay_entry_time": bool(bcfg.get("time_anchor_allow_replay_entry_time", True)),
+                "time_anchor_fingerprint": _time_anchor_cache_fingerprint(cand, config),
             },
         )
         cached = _cache_read(cache_dir, key) if bcfg.get("cache_enabled", True) else None
         if cached is not None:
             rows.append(cached)
             continue
+        candidate_signatures = _normalize_signature_entries(cand.get("signatures"))
         signatures_raw = fetch_signatures_for_address(client, token, limit=int(bcfg.get("max_signatures_per_address", 200)), limiter=limiter)
-        signatures = [str(item.get("signature", "")) for item in signatures_raw if isinstance(item, dict) and item.get("signature")]
-        signature_block_times = sorted(
-            {
-                int(item.get("blockTime") or 0)
-                for item in signatures_raw
-                if isinstance(item, dict) and int(item.get("blockTime") or 0) > 0
-            }
-        )
+        merged_signature_entries = candidate_signatures + [item for item in signatures_raw if isinstance(item, dict) and str(item.get("signature") or "").strip()]
+        seen_signatures: set[str] = set()
+        normalized_signatures: list[dict[str, Any]] = []
+        for item in merged_signature_entries:
+            normalized = _normalize_signature_entries([item])
+            if not normalized:
+                continue
+            entry = normalized[0]
+            signature = entry["signature"]
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            normalized_signatures.append(entry)
+        signatures = [item["signature"] for item in normalized_signatures]
+        signature_block_times = sorted({int(ts) for ts in _signature_time_candidates(normalized_signatures) if int(ts) > 0})
         txs = fetch_transactions_for_signatures(client, signatures[:25], limiter=limiter)
         slots = [int(tx.get("slot", 0) or 0) for tx in txs if int(tx.get("slot", 0) or 0) > 0]
         block_times = fetch_block_times(client, slots, limiter=limiter)
-        price_paths = _collect_price_paths(cand, block_times, config, signature_block_times=signature_block_times)
+        candidate_context = dict(cand)
+        if normalized_signatures:
+            candidate_context["signatures"] = normalized_signatures
+        if block_times and not candidate_context.get("block_times"):
+            candidate_context["block_times"] = block_times
+        price_paths = _collect_price_paths(
+            candidate_context,
+            block_times,
+            config,
+            signature_block_times=signature_block_times,
+            rpc_client=client,
+            limiter=limiter,
+        )
         row = {
             "token_address": token,
             "pair_address": cand.get("pair_address", ""),
