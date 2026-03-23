@@ -104,6 +104,64 @@ def _canonical_pair(row: dict[str, Any]) -> str | None:
     return str(pair_address) if pair_address else None
 
 
+def _first_present(sources: list[dict[str, Any]], *fields: str) -> Any:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for field in fields:
+            value = source.get(field)
+            if value not in (None, "", [], {}):
+                return value
+    return None
+
+
+def _copy_if_present(target: dict[str, Any], source: dict[str, Any], *fields: str) -> None:
+    for field in fields:
+        if field not in target and source.get(field) not in (None, "", [], {}):
+            target[field] = source[field]
+
+
+def build_backfill_candidates(loaded_inputs: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for token_address in sorted((loaded_inputs.get("token_inputs") or {}).keys()):
+        payload = loaded_inputs["token_inputs"][token_address]
+        entry = (payload.get("entry_candidates") or [None])[0] or {}
+        signal = (payload.get("signals") or [None])[0] or {}
+        trade = (payload.get("trades") or [None])[0] or {}
+        position = (payload.get("positions") or [None])[0] or {}
+        scored = (payload.get("scored_rows") or [None])[0] or {}
+        sources = [entry, signal, trade, position, scored]
+
+        candidate = dict(scored)
+        candidate.update(entry)
+        candidate.setdefault("token_address", token_address)
+        candidate.setdefault("pair_address", payload.get("pair_address") or _canonical_pair(entry) or _canonical_pair(signal) or _canonical_pair(trade) or _canonical_pair(position) or _canonical_pair(scored))
+
+        replay_entry_time = _first_present(
+            sources,
+            "price_path_start_ts",
+            "entry_time",
+            "entry_ts",
+            "replay_entry_time",
+            "opened_at",
+            "ts",
+            "timestamp",
+            "first_seen_at",
+            "discovered_at",
+        )
+        if replay_entry_time not in (None, ""):
+            candidate.setdefault("replay_entry_time", replay_entry_time)
+
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            _copy_if_present(candidate, source, "entry_time", "entry_ts", "opened_at", "first_seen_at", "discovered_at", "launch_ts", "pair_created_at", "pair_created_at_ts", "price_path_start_ts")
+            _copy_if_present(candidate, source, "signatures", "block_times", "seed_metadata", "replay_context", "discovery_context")
+
+        candidates.append(candidate)
+    return candidates
+
+
 
 def _normalize_price_path_row(row: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(row)
