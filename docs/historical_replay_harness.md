@@ -128,24 +128,13 @@ Calibration candidates are now applied as real replay setting overrides. The har
 
 `trades.jsonl` must be analyzer-usable. Preferred output is a canonical buy/sell ledger. When replay writes a flattened historical lifecycle row instead, the analyzer must still treat that row as a first-class closed trade lifecycle rather than falling back to `positions.json` as the hidden primary source of truth. `positions.json` remains a support / fallback artifact, not the only way to recover closed trades.
 
+## Seed price-path backfill fallbacks
 
-## Opened-but-unresolved lifecycle contract
+Replay seed backfill now uses staged price-path recovery instead of a single OHLCV fetch. The collector first tries the requested launch window and interval, then can widen the window, retry on coarser intervals, retry without a pair binding, and shift the start timestamp backward by a prelaunch buffer. The selected result keeps compact provenance in `attempt_count`, `attempts`, `resolved_via_fallback`, and `fallback_mode` so missing paths remain diagnosable instead of collapsing into a generic `no_ohlcv_rows` outcome.
 
-If replay reaches `position_opened`, it must continue to emit an analyzer-usable row in both `trades.jsonl` and `trade_feature_matrix.jsonl` even when historical exit resolution stays incomplete.
+Before those OHLCV attempts begin, the backfill layer now resolves a seed time anchor in stages. It prefers explicit candidate fields such as `price_path_start_ts`, `entry_time`, `replay_entry_time`, `opened_at`, and discovery-style timestamps. If those are absent it checks nested local metadata, cached `block_times`, embedded `signatures[].blockTime`, and then a controlled signature-hydration path that resolves earliest usable `blockTime` values from string-only signatures without inventing timestamps. Successful and missing rows expose that provenance through `price_path_time_source`, `price_path_time_derived`, `price_path_anchor_field`, `time_anchor_resolution_status`, `time_anchor_attempts`, `signature_hydration_attempted`, `signature_hydration_count`, and `missing_required_fields`.
 
-This applies to cases such as:
+Replay input assembly can also emit `replay_entry_time` into backfill-ready candidates when the historical harness already reconstructed an entry timestamp from signals, trades, or positions. That keeps the same real time anchor available to both lifecycle replay and upstream price-path population instead of letting sparse seed fixtures stop at `attempt_count = 0` before the first provider fetch.
 
-- `missing_price_path`
-- `truncated_price_path`
-- `partial_exit_without_full_exit`
-- `historical_exit_not_resolved`
+Price-history bootstrap is now diagnosed separately from real provider/data misses. Backfill rows expose `price_history_provider`, `price_history_provider_status`, `provider_bootstrap_ok`, `provider_config_source`, and `provider_request_summary`, so a row can fail fast on `price_history_provider_unconfigured`, `price_history_provider_invalid`, or `price_history_provider_disabled` without burning the whole staged fallback ladder. Once bootstrap is configured, remaining warnings should describe actual provider/data outcomes such as empty payloads, HTTP failures, parse failures, incomplete windows, or pair/token capability mismatches.
 
-Required contract:
-
-- the position is considered opened
-- `trades.jsonl` contains a row for that lifecycle
-- `trade_feature_matrix.jsonl` contains a row for that lifecycle
-- `replay_data_status` is typically `historical_partial`
-- `replay_resolution_status` is `unresolved` or `partial`
-
-`positions.json` remains useful support output, but downstream analysis must not depend on it as the hidden primary source of truth for opened-but-unresolved lifecycles.

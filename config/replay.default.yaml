@@ -23,6 +23,50 @@ backfill:
   request_timeout_sec: 20
   max_rps: 5
   cache_enabled: true
+  collect_price_paths: true
+  price_history_enabled: true
+  price_history_provider: birdeye_ohlcv_v3
+  price_path_window_sec: 900
+  price_path_window_max_sec: 7200
+  price_interval_sec: 15
+  price_interval_fallbacks: [60, 300]
+  price_path_window_fallback_multipliers: [4, 8]
+  price_path_prelaunch_buffer_sec: 300
+  price_path_try_pairless: true
+  price_path_min_points: 2
+  price_path_require_nonempty: true
+  price_path_retry_attempts: 12
+  enrich_time_anchor: true
+  time_anchor_field_priority:
+    - price_path_start_ts
+    - entry_time
+    - replay_entry_time
+    - opened_at
+    - signal_timestamp
+    - first_seen_at
+    - discovered_at
+    - launch_ts
+    - pair_created_at
+    - pair_created_at_ts
+    - first_trade_at
+  time_anchor_use_block_times: true
+  time_anchor_use_signature_hydration: true
+  time_anchor_signature_limit: 25
+  time_anchor_require_earliest: true
+  time_anchor_prelaunch_buffer_sec: 300
+  time_anchor_window_sec: 900
+  time_anchor_allow_replay_entry_time: true
+
+providers:
+  price_history:
+    provider: birdeye_ohlcv_v3
+    base_url: https://public-api.birdeye.so
+    token_endpoint: defi/v3/ohlcv
+    pair_endpoint: defi/v3/ohlcv/pair
+    chain: solana
+    require_pair_address: false
+    allow_pairless_token_lookup: true
+
 
 simulation:
   max_open_positions: 1
