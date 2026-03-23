@@ -127,3 +127,25 @@ Calibration candidates are now applied as real replay setting overrides. The har
 ## Lifecycle artifact contract
 
 `trades.jsonl` must be analyzer-usable. Preferred output is a canonical buy/sell ledger. When replay writes a flattened historical lifecycle row instead, the analyzer must still treat that row as a first-class closed trade lifecycle rather than falling back to `positions.json` as the hidden primary source of truth. `positions.json` remains a support / fallback artifact, not the only way to recover closed trades.
+
+
+## Opened-but-unresolved lifecycle contract
+
+If replay reaches `position_opened`, it must continue to emit an analyzer-usable row in both `trades.jsonl` and `trade_feature_matrix.jsonl` even when historical exit resolution stays incomplete.
+
+This applies to cases such as:
+
+- `missing_price_path`
+- `truncated_price_path`
+- `partial_exit_without_full_exit`
+- `historical_exit_not_resolved`
+
+Required contract:
+
+- the position is considered opened
+- `trades.jsonl` contains a row for that lifecycle
+- `trade_feature_matrix.jsonl` contains a row for that lifecycle
+- `replay_data_status` is typically `historical_partial`
+- `replay_resolution_status` is `unresolved` or `partial`
+
+`positions.json` remains useful support output, but downstream analysis must not depend on it as the hidden primary source of truth for opened-but-unresolved lifecycles.
