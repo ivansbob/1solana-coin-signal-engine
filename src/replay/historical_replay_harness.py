@@ -830,6 +830,25 @@ def _replay_token_sort_key(item: tuple[str, dict[str, Any]]) -> tuple[int, int, 
         str(token),
     )
 
+def _opened_position_contract(*, trade: dict[str, Any] | None, trade_feature_row: dict[str, Any] | None, replay_resolution_status: str, replay_data_status: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    if trade is None or trade_feature_row is None:
+        raise AssertionError("opened_position_must_emit_trade_and_matrix")
+
+    warnings = list(trade.get("exit_warnings") or [])
+    if replay_resolution_status == "unresolved" and "missing_price_path" in warnings:
+        replay_data_status = "historical_partial"
+    elif replay_resolution_status == "partial" and any(flag in warnings for flag in {"truncated_price_path", "partial_exit_without_full_exit"}):
+        replay_data_status = "historical_partial"
+    elif replay_resolution_status == "unresolved" and "historical_exit_not_resolved" in warnings:
+        replay_data_status = "historical_partial"
+
+    trade["replay_resolution_status"] = replay_resolution_status
+    trade["replay_data_status"] = replay_data_status
+    trade_feature_row["replay_resolution_status"] = replay_resolution_status
+    trade_feature_row["replay_data_status"] = replay_data_status
+    return trade, trade_feature_row
+
+
 def replay_token_lifecycle(
     *,
     token_payload: dict[str, Any],
@@ -1050,6 +1069,12 @@ def replay_token_lifecycle(
         replay_input_origin=replay_input_origin,
         synthetic_assist_flag=synthetic_assist_flag,
     )
+    trade, trade_feature_row = _opened_position_contract(
+        trade=trade,
+        trade_feature_row=trade_feature_row,
+        replay_resolution_status=replay_resolution_status,
+        replay_data_status=replay_data_status,
+    )
 
     return {
         "signal": signal,
@@ -1240,6 +1265,9 @@ def run_historical_replay(
     partial_rows = sum(1 for result in results if result["replay_data_status"] == "historical_partial")
     unresolved_rows = sum(1 for result in results if result["resolution_status"] in {"unresolved", "partial"})
     ignored_rows = sum(1 for result in results if result["resolution_status"] == "ignored")
+    opened_positions = sum(1 for result in results if (result.get("position") or {}).get("status") in {"open", "closed"})
+    unresolved_open_positions = sum(1 for result in results if (result.get("position") or {}).get("status") == "open" and result["resolution_status"] == "unresolved")
+    partial_open_positions = sum(1 for result in results if (result.get("position") or {}).get("status") == "open" and result["resolution_status"] == "partial")
     synthetic_used = synthetic_assist_flag
     if not replay_mode == "synthetic_smoke" and partial_rows:
         replay_mode = "historical_partial"
@@ -1268,6 +1296,9 @@ def run_historical_replay(
         f"- partial_rows: {partial_rows}",
         f"- unresolved_rows: {unresolved_rows}",
         f"- ignored_rows: {ignored_rows}",
+        f"- opened_positions: {opened_positions}",
+        f"- unresolved_open_positions: {unresolved_open_positions}",
+        f"- partial_open_positions: {partial_open_positions}",
         f"- synthetic_fallback_used: {synthetic_used}",
         f"- signals: {len(signals)}",
         f"- trades: {len(trades)}",
@@ -1295,6 +1326,9 @@ def run_historical_replay(
         "partial_rows": partial_rows,
         "unresolved_rows": unresolved_rows,
         "ignored_rows": ignored_rows,
+        "opened_positions": opened_positions,
+        "unresolved_open_positions": unresolved_open_positions,
+        "partial_open_positions": partial_open_positions,
         "synthetic_fallback_used": synthetic_used,
         "signals": len(signals),
         "trades": len(trades),

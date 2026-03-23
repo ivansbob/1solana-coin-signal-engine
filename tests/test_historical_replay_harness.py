@@ -319,3 +319,219 @@ def test_historical_replay_uses_historical_regime_for_exit_resolution(tmp_path, 
     assert calls["trend"] >= 1
     assert calls["scalp"] == 0
     assert result["artifacts"].trades[0]["exit_reason_final"] == "trend_test_exit"
+
+
+def _write_unresolved_fixture(
+    artifact_dir: Path,
+    *,
+    entry_decision: str = "ENTER",
+    regime_decision: str = "SCALP",
+    price_path: list[dict] | None = None,
+    truncated: bool = False,
+) -> None:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "entry_candidates.json").write_text(json.dumps([{
+        "token_address": "tok_unresolved",
+        "pair_address": "pair_unresolved",
+        "entry_decision": entry_decision,
+        "regime_decision": regime_decision,
+        "entry_time": "2026-03-10T12:00:00Z",
+        "entry_price": 1.0,
+    }]), encoding="utf-8")
+    (artifact_dir / "scored_tokens.jsonl").write_text(json.dumps({
+        "token_address": "tok_unresolved",
+        "pair_address": "pair_unresolved",
+        "symbol": "UNR",
+        "entry_decision": entry_decision,
+        "regime_decision": regime_decision,
+        "entry_time": "2026-03-10T12:00:00Z",
+        "entry_price": 1.0,
+        "price_usd": 1.0,
+        "final_score": 40.0,
+        "final_score_pre_wallet": 40.0,
+        "entry_confidence": 0.8,
+        "recommended_position_pct": 0.25,
+        "effective_position_pct": 0.25,
+        "base_position_pct": 0.25,
+        "liquidity_usd": 30000.0,
+        "buy_pressure": 0.8,
+        "volume_velocity": 3.0,
+    }) + chr(10), encoding="utf-8")
+    row = {
+        "token_address": "tok_unresolved",
+        "pair_address": "pair_unresolved",
+        "price_path": price_path or [],
+    }
+    if truncated:
+        row["truncated"] = True
+    (artifact_dir / "price_paths.json").write_text(json.dumps([row]), encoding="utf-8")
+
+
+def test_historical_replay_emits_trade_and_matrix_for_missing_price_path(tmp_path):
+    artifact_dir = tmp_path / "fixture_missing_price_path"
+    _write_unresolved_fixture(artifact_dir, price_path=[])
+
+    result = run_historical_replay(
+        artifact_dir=artifact_dir,
+        run_id="unit_missing_price_path",
+        config_path=ROOT / "config" / "replay.default.yaml",
+        output_base_dir=tmp_path,
+        dry_run=True,
+    )
+
+    assert len(result["artifacts"].trades) == 1
+    assert len(result["artifacts"].trade_feature_matrix) == 1
+    trade = result["artifacts"].trades[0]
+    position = result["artifacts"].positions[0]
+    assert trade["replay_resolution_status"] == "unresolved"
+    assert trade["replay_data_status"] == "historical_partial"
+    assert "missing_price_path" in (trade.get("exit_warnings") or [])
+    assert position["status"] == "open"
+    assert position["resolution_status"] == "unresolved"
+
+
+def test_historical_replay_emits_trade_and_matrix_for_truncated_price_path(tmp_path):
+    artifact_dir = tmp_path / "fixture_truncated_price_path"
+    _write_unresolved_fixture(
+        artifact_dir,
+        price_path=[
+            {"offset_sec": 0, "price": 1.0, "timestamp": "2026-03-10T12:00:00Z"},
+            {"offset_sec": 15, "price": 1.01, "timestamp": "2026-03-10T12:00:15Z"},
+        ],
+        truncated=True,
+    )
+
+    result = run_historical_replay(
+        artifact_dir=artifact_dir,
+        run_id="unit_truncated_price_path",
+        config_path=ROOT / "config" / "replay.default.yaml",
+        output_base_dir=tmp_path,
+        dry_run=True,
+    )
+
+    trade = result["artifacts"].trades[0]
+    assert len(result["artifacts"].trade_feature_matrix) == 1
+    assert trade["replay_resolution_status"] == "partial"
+    assert "truncated_price_path" in (trade.get("exit_warnings") or [])
+
+
+def test_historical_replay_emits_partial_trade_when_only_partial_exit_is_seen(tmp_path, monkeypatch):
+    import src.replay.historical_replay_harness as replay_harness
+
+    artifact_dir = tmp_path / "fixture_partial_exit_only"
+    _write_unresolved_fixture(
+        artifact_dir,
+        regime_decision="TREND",
+        price_path=[
+            {"offset_sec": 0, "price": 1.0, "timestamp": "2026-03-10T12:00:00Z"},
+            {"offset_sec": 30, "price": 1.16, "timestamp": "2026-03-10T12:00:30Z"},
+        ],
+    )
+
+    original_resolve_exit = replay_harness._resolve_exit
+
+    def fake_resolve_exit(base_context, entry, token_payload, regime_decision, state, settings):
+        payload = original_resolve_exit(base_context, entry, token_payload, regime_decision, state, settings)
+        payload.update({
+            "resolution_status": "partial",
+            "replay_data_status": "historical_partial",
+            "warning": "partial_exit_without_full_exit",
+            "exit_decision": "PARTIAL_EXIT",
+            "exit_reason_final": "trend_partial_take_profit_1",
+            "exit_flags": ["partial_take_profit_1"],
+            "exit_warnings": ["partial_exit_without_full_exit"],
+        })
+        return payload
+
+    monkeypatch.setattr(replay_harness, "_resolve_exit", fake_resolve_exit)
+
+    result = run_historical_replay(
+        artifact_dir=artifact_dir,
+        run_id="unit_partial_exit_only",
+        config_path=ROOT / "config" / "replay.default.yaml",
+        output_base_dir=tmp_path,
+        dry_run=True,
+    )
+
+    trade = result["artifacts"].trades[0]
+    assert trade["replay_resolution_status"] == "partial"
+    assert trade["exit_decision"] == "PARTIAL_EXIT"
+    assert trade["exit_reason_final"]
+    assert len(result["artifacts"].trade_feature_matrix) == 1
+
+
+def test_historical_replay_ignored_token_still_does_not_emit_trade(tmp_path):
+    artifact_dir = tmp_path / "fixture_ignored_emit_contract"
+    _write_unresolved_fixture(artifact_dir, entry_decision="IGNORE")
+
+    result = run_historical_replay(
+        artifact_dir=artifact_dir,
+        run_id="unit_ignored_emit_contract",
+        config_path=ROOT / "config" / "replay.default.yaml",
+        output_base_dir=tmp_path,
+        dry_run=True,
+    )
+
+    assert result["artifacts"].trades == []
+    assert result["artifacts"].trade_feature_matrix == []
+
+
+def test_historical_replay_summary_counts_opened_unresolved_positions(tmp_path, monkeypatch):
+    import src.replay.historical_replay_harness as replay_harness
+
+    base = tmp_path / "fixture_summary_counts"
+    artifact_dir = base / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    entries = [
+        {"token_address": "tok_resolved", "pair_address": "pair_resolved", "entry_decision": "ENTER", "regime_decision": "SCALP", "entry_time": "2026-03-10T12:00:00Z", "entry_price": 1.0},
+        {"token_address": "tok_unresolved", "pair_address": "pair_unresolved", "entry_decision": "ENTER", "regime_decision": "SCALP", "entry_time": "2026-03-10T12:00:00Z", "entry_price": 1.0},
+        {"token_address": "tok_ignored", "pair_address": "pair_ignored", "entry_decision": "IGNORE", "regime_decision": "SCALP", "entry_time": "2026-03-10T12:00:00Z", "entry_price": 1.0},
+    ]
+    (artifact_dir / "entry_candidates.json").write_text(json.dumps(entries), encoding="utf-8")
+    scored = [
+        {"token_address": "tok_resolved", "pair_address": "pair_resolved", "symbol": "RES", "entry_decision": "ENTER", "regime_decision": "SCALP", "entry_time": "2026-03-10T12:00:00Z", "entry_price": 1.0, "price_usd": 1.0, "final_score": 40.0, "final_score_pre_wallet": 40.0, "entry_confidence": 0.8, "recommended_position_pct": 0.25, "effective_position_pct": 0.25, "base_position_pct": 0.25, "liquidity_usd": 30000.0, "buy_pressure": 0.8, "volume_velocity": 3.0},
+        {"token_address": "tok_unresolved", "pair_address": "pair_unresolved", "symbol": "UNR", "entry_decision": "ENTER", "regime_decision": "SCALP", "entry_time": "2026-03-10T12:00:00Z", "entry_price": 1.0, "price_usd": 1.0, "final_score": 40.0, "final_score_pre_wallet": 40.0, "entry_confidence": 0.8, "recommended_position_pct": 0.25, "effective_position_pct": 0.25, "base_position_pct": 0.25, "liquidity_usd": 30000.0, "buy_pressure": 0.8, "volume_velocity": 3.0},
+        {"token_address": "tok_ignored", "pair_address": "pair_ignored", "symbol": "IGN", "entry_decision": "IGNORE", "regime_decision": "SCALP", "entry_time": "2026-03-10T12:00:00Z", "entry_price": 1.0, "price_usd": 1.0, "final_score": 40.0, "final_score_pre_wallet": 40.0, "entry_confidence": 0.8, "recommended_position_pct": 0.25, "effective_position_pct": 0.25, "base_position_pct": 0.25, "liquidity_usd": 30000.0, "buy_pressure": 0.8, "volume_velocity": 3.0},
+    ]
+    (artifact_dir / "scored_tokens.jsonl").write_text("".join(json.dumps(row) + chr(10) for row in scored), encoding="utf-8")
+    (artifact_dir / "price_paths.json").write_text(json.dumps([
+        {"token_address": "tok_resolved", "pair_address": "pair_resolved", "price_path": [{"offset_sec": 0, "price": 1.0, "timestamp": "2026-03-10T12:00:00Z"}]},
+        {"token_address": "tok_unresolved", "pair_address": "pair_unresolved", "price_path": []},
+    ]), encoding="utf-8")
+
+    original_resolve_exit = replay_harness._resolve_exit
+
+    def fake_resolve_exit(base_context, entry, token_payload, regime_decision, state, settings):
+        token = base_context.get("token_address") or token_payload.get("token_address")
+        if token == "tok_resolved":
+            return {
+                "resolution_status": "resolved",
+                "replay_data_status": "historical",
+                "exit_decision": "FULL_EXIT",
+                "exit_reason_final": "scalp_take_profit",
+                "exit_flags": ["take_profit"],
+                "exit_warnings": [],
+                "exit_price": 1.18,
+                "exit_time": "2026-03-10T12:00:35Z",
+                "hold_sec": 35,
+                "gross_pnl_pct": 18.0,
+                "net_pnl_pct": 17.0,
+            }
+        return original_resolve_exit(base_context, entry, token_payload, regime_decision, state, settings)
+
+    monkeypatch.setattr(replay_harness, "_resolve_exit", fake_resolve_exit)
+
+    result = run_historical_replay(
+        artifact_dir=artifact_dir,
+        run_id="unit_summary_counts",
+        config_path=ROOT / "config" / "replay.default.yaml",
+        output_base_dir=tmp_path,
+        dry_run=True,
+    )
+
+    summary = result["summary"]
+    assert summary["opened_positions"] == 2
+    assert summary["unresolved_open_positions"] == 1
+    assert summary["ignored_rows"] == 1
+    assert summary["trades"] == 2
+    assert summary["trade_feature_matrix_rows"] == 2
