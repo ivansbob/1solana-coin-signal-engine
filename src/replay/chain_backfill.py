@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from collectors.price_history_client import PriceHistoryClient
+from collectors.price_history_client import PriceHistoryClient, validate_price_history_provider_config
 from collectors.solana_rpc_client import SolanaRpcClient
 
 
@@ -393,6 +393,12 @@ def _build_missing_price_path(
     end_ts: int | None = None,
     interval_sec: int | None = None,
     attempts: list[dict[str, Any]] | None = None,
+    attempt_strategy: str = "exhausted",
+    price_history_provider: str | None = None,
+    price_history_provider_status: str | None = None,
+    provider_bootstrap_ok: bool = False,
+    provider_config_source: str | None = None,
+    provider_request_summary: dict[str, Any] | None = None,
     price_path_time_source: str | None = None,
     price_path_time_derived: bool = False,
     price_path_anchor_field: str | None = None,
@@ -406,7 +412,12 @@ def _build_missing_price_path(
     return {
         "token_address": token,
         "pair_address": pair_address,
-        "source_provider": "price_history",
+        "source_provider": price_history_provider or "price_history",
+        "price_history_provider": price_history_provider,
+        "price_history_provider_status": price_history_provider_status,
+        "provider_bootstrap_ok": bool(provider_bootstrap_ok),
+        "provider_config_source": provider_config_source,
+        "provider_request_summary": provider_request_summary or {},
         "requested_start_ts": start_ts,
         "requested_end_ts": end_ts,
         "interval_sec": interval_sec,
@@ -416,7 +427,7 @@ def _build_missing_price_path(
         "price_path_status": "missing",
         "warning": warning,
         "attempt_count": len(attempts or []),
-        "attempt_strategy": "exhausted",
+        "attempt_strategy": attempt_strategy,
         "attempts": attempts or [],
         "resolved_via_fallback": False,
         "fallback_mode": None,
@@ -471,6 +482,7 @@ def _attempt_summary(path: dict[str, Any], *, strategy: str, fallback_mode: str 
         "missing": bool(path.get("missing")),
         "warning": path.get("warning"),
         "point_count": _price_path_points(path),
+        "provider_request_summary": path.get("provider_request_summary") or {},
     }
 
 
@@ -564,6 +576,14 @@ def _collect_price_paths(
     pair_address = str(raw_pair_address or "") or None
     if not bcfg.get("collect_price_paths", True):
         return []
+
+    provider_config = validate_price_history_provider_config(config)
+    provider_name = provider_config.get("price_history_provider")
+    provider_status = provider_config.get("price_history_provider_status")
+    provider_bootstrap_ok = bool(provider_config.get("provider_bootstrap_ok"))
+    provider_config_source = provider_config.get("provider_config_source")
+    provider_request_summary = dict(provider_config.get("provider_request_summary") or {})
+
     start_context = _resolve_time_anchor(
         cand,
         block_times,
@@ -579,6 +599,52 @@ def _collect_price_paths(
                 token,
                 pair_address,
                 warning="price_path_start_ts_missing",
+                price_history_provider=provider_name,
+                price_history_provider_status=provider_status,
+                provider_bootstrap_ok=provider_bootstrap_ok,
+                provider_config_source=provider_config_source,
+                provider_request_summary=provider_request_summary,
+                price_path_time_source=start_context.get("price_path_time_source"),
+                price_path_time_derived=bool(start_context.get("price_path_time_derived")),
+                price_path_anchor_field=start_context.get("price_path_anchor_field"),
+                missing_required_fields=list(start_context.get("missing_required_fields") or []),
+                time_anchor_resolution_status=start_context.get("time_anchor_resolution_status"),
+                time_anchor_attempts=list(start_context.get("time_anchor_attempts") or []),
+                signature_hydration_attempted=bool(start_context.get("signature_hydration_attempted")),
+                signature_hydration_count=int(start_context.get("signature_hydration_count") or 0),
+                resolved_time_anchor_ts=start_context.get("resolved_time_anchor_ts"),
+            )
+        ]
+
+    if not provider_bootstrap_ok:
+        bootstrap_warning = str(provider_config.get("warning") or "price_history_provider_unconfigured")
+        bootstrap_attempt = {
+            "strategy": "provider_bootstrap_failed",
+            "fallback_mode": None,
+            "pair_address": pair_address,
+            "requested_start_ts": start_ts,
+            "requested_end_ts": None,
+            "interval_sec": int(bcfg.get("price_interval_sec", 60) or 60),
+            "price_path_status": "missing",
+            "missing": True,
+            "warning": bootstrap_warning,
+            "point_count": 0,
+            "provider_request_summary": provider_request_summary,
+        }
+        return [
+            _build_missing_price_path(
+                token,
+                pair_address,
+                warning=bootstrap_warning,
+                start_ts=start_ts,
+                interval_sec=int(bcfg.get("price_interval_sec", 60) or 60),
+                attempts=[bootstrap_attempt],
+                attempt_strategy="provider_bootstrap_failed",
+                price_history_provider=provider_name,
+                price_history_provider_status=provider_status,
+                provider_bootstrap_ok=False,
+                provider_config_source=provider_config_source,
+                provider_request_summary=provider_request_summary,
                 price_path_time_source=start_context.get("price_path_time_source"),
                 price_path_time_derived=bool(start_context.get("price_path_time_derived")),
                 price_path_anchor_field=start_context.get("price_path_anchor_field"),
@@ -595,14 +661,51 @@ def _collect_price_paths(
     retry_attempts = max(int(bcfg.get("price_path_retry_attempts", 3) or 3), 1)
     limit = max(int(bcfg.get("price_path_limit", 256) or 256), 1)
     client = PriceHistoryClient(
-        base_url=bcfg.get("price_history_base_url"),
-        api_key=config.get("price_history_api_key"),
-        provider=str(bcfg.get("price_provider") or "price_history"),
+        base_url=provider_config.get("base_url"),
+        api_key=provider_config.get("api_key"),
+        provider=str(provider_name or "price_history"),
+        token_endpoint=provider_config.get("token_endpoint"),
+        pair_endpoint=provider_config.get("pair_endpoint"),
+        chain=provider_config.get("chain"),
+        require_pair_address=bool(provider_config.get("require_pair_address")),
+        allow_pairless_token_lookup=bool(provider_config.get("allow_pairless_token_lookup", True)),
+        provider_status=str(provider_status or "configured"),
+        provider_config_source=provider_config_source,
+        auth_header=str(provider_config.get("auth_header") or "X-API-KEY"),
+        request_kind=str(provider_config.get("request_kind") or "ohlcv"),
     )
 
     attempts = _iter_price_path_attempts(token, pair_address, start_ts, config)
+    if not provider_config.get("allow_pairless_token_lookup", True):
+        attempts = [attempt for attempt in attempts if attempt.get("pair_address") is not None]
     if retry_attempts < len(attempts):
         attempts = attempts[:retry_attempts]
+
+    if not attempts:
+        return [
+            _build_missing_price_path(
+                token,
+                pair_address,
+                warning="provider_pair_address_required",
+                start_ts=start_ts,
+                interval_sec=int(bcfg.get("price_interval_sec", 60) or 60),
+                attempt_strategy="provider_bootstrap_failed",
+                price_history_provider=provider_name,
+                price_history_provider_status=provider_status,
+                provider_bootstrap_ok=True,
+                provider_config_source=provider_config_source,
+                provider_request_summary=provider_request_summary,
+                price_path_time_source=start_context.get("price_path_time_source"),
+                price_path_time_derived=bool(start_context.get("price_path_time_derived")),
+                price_path_anchor_field=start_context.get("price_path_anchor_field"),
+                missing_required_fields=list(start_context.get("missing_required_fields") or []),
+                time_anchor_resolution_status=start_context.get("time_anchor_resolution_status"),
+                time_anchor_attempts=list(start_context.get("time_anchor_attempts") or []),
+                signature_hydration_attempted=bool(start_context.get("signature_hydration_attempted")),
+                signature_hydration_count=int(start_context.get("signature_hydration_count") or 0),
+                resolved_time_anchor_ts=start_context.get("resolved_time_anchor_ts"),
+            )
+        ]
 
     attempt_summaries: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
@@ -628,6 +731,11 @@ def _collect_price_paths(
                 warning="price_path_attempts_exhausted",
                 start_ts=start_ts,
                 attempts=attempt_summaries,
+                price_history_provider=provider_name,
+                price_history_provider_status=provider_status,
+                provider_bootstrap_ok=True,
+                provider_config_source=provider_config_source,
+                provider_request_summary=provider_request_summary,
                 price_path_time_source=start_context.get("price_path_time_source"),
                 price_path_time_derived=bool(start_context.get("price_path_time_derived")),
                 price_path_anchor_field=start_context.get("price_path_anchor_field"),
@@ -647,6 +755,11 @@ def _collect_price_paths(
         fallback_mode = str(best_summary.get("strategy"))
     enriched.update(
         {
+            "price_history_provider": enriched.get("price_history_provider") or provider_name,
+            "price_history_provider_status": enriched.get("price_history_provider_status") or provider_status,
+            "provider_bootstrap_ok": bool(enriched.get("provider_bootstrap_ok", True)),
+            "provider_config_source": enriched.get("provider_config_source") or provider_config_source,
+            "provider_request_summary": enriched.get("provider_request_summary") or provider_request_summary,
             "attempt_count": len(attempt_summaries),
             "attempt_strategy": "staged_fallback",
             "attempts": attempt_summaries,

@@ -147,6 +147,7 @@ def _base_config(**backfill_overrides):
     backfill = {
         "cache_enabled": False,
         "max_signatures_per_address": 5,
+        "price_history_provider": "birdeye_ohlcv_v3",
         "price_path_window_sec": 120,
         "price_path_window_max_sec": 600,
         "price_interval_sec": 15,
@@ -158,7 +159,19 @@ def _base_config(**backfill_overrides):
         "price_path_retry_attempts": 12,
     }
     backfill.update(backfill_overrides)
-    return {"backfill": backfill}
+    return {
+        "backfill": backfill,
+        "providers": {
+            "price_history": {
+                "provider": backfill.get("price_history_provider"),
+                "base_url": "https://public-api.birdeye.so",
+                "token_endpoint": "defi/v3/ohlcv",
+                "pair_endpoint": "defi/v3/ohlcv/pair",
+                "allow_pairless_token_lookup": True,
+                "require_pair_address": False,
+            }
+        },
+    }
 
 
 def test_build_chain_context_embeds_replay_usable_price_paths(monkeypatch):
@@ -528,3 +541,85 @@ def test_collect_price_paths_runs_price_path_attempts_after_signature_anchor_res
     assert result["attempt_count"] >= 1
     assert TrackingClient.seen_start_ts[0] == 1710000000
     assert result["price_path_time_source"] == "signature_block_time"
+
+
+def test_chain_backfill_fails_fast_on_provider_bootstrap_error(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", StagedPriceHistoryClient)
+    config = _base_config()
+    config["backfill"].pop("price_history_provider", None)
+    config["providers"] = {}
+
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "entry_time": "2026-03-16T00:00:00Z"},
+        {},
+        config,
+    )[0]
+
+    assert result["attempt_count"] == 1
+    assert result["attempt_strategy"] == "provider_bootstrap_failed"
+    assert result["warning"] == "price_history_provider_unconfigured"
+    assert result["provider_bootstrap_ok"] is False
+
+
+def test_chain_backfill_records_provider_status_in_price_path_row(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FakePriceHistoryClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "entry_time": "2026-03-16T00:00:00Z"},
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+
+    assert result["price_history_provider"] == "birdeye_ohlcv_v3"
+    assert result["price_history_provider_status"] == "configured"
+    assert result["provider_bootstrap_ok"] is True
+
+
+def test_chain_backfill_runs_real_attempts_when_provider_is_configured(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", StagedPriceHistoryClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "entry_time": "2026-03-16T00:00:00Z"},
+        {},
+        _base_config(),
+    )[0]
+
+    assert result["attempt_count"] >= 1
+    assert result["warning"] != "price_history_provider_unconfigured"
+    assert result["price_history_provider_status"] == "configured"
+
+
+def test_chain_backfill_pairless_attempt_respects_provider_capabilities(monkeypatch):
+    class PairlessTracker(StagedPriceHistoryClient):
+        seen_pairless = False
+
+        def fetch_price_path(self, **kwargs):
+            if kwargs.get("pair_address") is None:
+                self.__class__.seen_pairless = True
+            result = super().fetch_price_path(**kwargs)
+            if kwargs.get("pair_address"):
+                result.update({"price_path": [], "missing": True, "price_path_status": "missing", "warning": "provider_pair_not_found", "truncated": False})
+            return result
+
+    PairlessTracker.seen_pairless = False
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", PairlessTracker)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "entry_time": "2026-03-16T00:00:00Z"},
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+
+    assert PairlessTracker.seen_pairless is True
+    assert result["warning"] != "price_history_provider_unconfigured"
+    assert result["pair_address"] is None
+
+
+def test_seed_backfill_no_longer_stops_at_provider_unconfigured(monkeypatch):
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", StagedPriceHistoryClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "entry_time": "2026-03-16T00:00:00Z"},
+        {},
+        _base_config(),
+    )[0]
+
+    assert result["requested_start_ts"] == 1_773_619_200
+    assert result["warning"] != "price_history_provider_unconfigured"
+    assert result["price_path_status"] in {"complete", "partial", "missing"}

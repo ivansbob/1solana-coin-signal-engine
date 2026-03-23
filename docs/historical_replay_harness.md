@@ -136,3 +136,5 @@ Before those OHLCV attempts begin, the backfill layer now resolves a seed time a
 
 Replay input assembly can also emit `replay_entry_time` into backfill-ready candidates when the historical harness already reconstructed an entry timestamp from signals, trades, or positions. That keeps the same real time anchor available to both lifecycle replay and upstream price-path population instead of letting sparse seed fixtures stop at `attempt_count = 0` before the first provider fetch.
 
+Price-history bootstrap is now diagnosed separately from real provider/data misses. Backfill rows expose `price_history_provider`, `price_history_provider_status`, `provider_bootstrap_ok`, `provider_config_source`, and `provider_request_summary`, so a row can fail fast on `price_history_provider_unconfigured`, `price_history_provider_invalid`, or `price_history_provider_disabled` without burning the whole staged fallback ladder. Once bootstrap is configured, remaining warnings should describe actual provider/data outcomes such as empty payloads, HTTP failures, parse failures, incomplete windows, or pair/token capability mismatches.
+

@@ -24,6 +24,8 @@ backfill:
   max_rps: 5
   cache_enabled: true
   collect_price_paths: true
+  price_history_enabled: true
+  price_history_provider: birdeye_ohlcv_v3
   price_path_window_sec: 900
   price_path_window_max_sec: 7200
   price_interval_sec: 15
@@ -54,6 +56,17 @@ backfill:
   time_anchor_prelaunch_buffer_sec: 300
   time_anchor_window_sec: 900
   time_anchor_allow_replay_entry_time: true
+
+providers:
+  price_history:
+    provider: birdeye_ohlcv_v3
+    base_url: https://public-api.birdeye.so
+    token_endpoint: defi/v3/ohlcv
+    pair_endpoint: defi/v3/ohlcv/pair
+    chain: solana
+    require_pair_address: false
+    allow_pairless_token_lookup: true
+
 
 simulation:
   max_open_positions: 1
