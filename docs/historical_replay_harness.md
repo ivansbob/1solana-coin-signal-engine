@@ -127,3 +127,8 @@ Calibration candidates are now applied as real replay setting overrides. The har
 ## Lifecycle artifact contract
 
 `trades.jsonl` must be analyzer-usable. Preferred output is a canonical buy/sell ledger. When replay writes a flattened historical lifecycle row instead, the analyzer must still treat that row as a first-class closed trade lifecycle rather than falling back to `positions.json` as the hidden primary source of truth. `positions.json` remains a support / fallback artifact, not the only way to recover closed trades.
+
+## Seed price-path backfill fallbacks
+
+Replay seed backfill now uses staged price-path recovery instead of a single OHLCV fetch. The collector first tries the requested launch window and interval, then can widen the window, retry on coarser intervals, retry without a pair binding, and shift the start timestamp backward by a prelaunch buffer. The selected result keeps compact provenance in `attempt_count`, `attempts`, `resolved_via_fallback`, and `fallback_mode` so missing paths remain diagnosable instead of collapsing into a generic `no_ohlcv_rows` outcome.
+

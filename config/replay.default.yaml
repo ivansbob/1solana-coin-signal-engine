@@ -23,6 +23,17 @@ backfill:
   request_timeout_sec: 20
   max_rps: 5
   cache_enabled: true
+  collect_price_paths: true
+  price_path_window_sec: 900
+  price_path_window_max_sec: 7200
+  price_interval_sec: 15
+  price_interval_fallbacks: [60, 300]
+  price_path_window_fallback_multipliers: [4, 8]
+  price_path_prelaunch_buffer_sec: 300
+  price_path_try_pairless: true
+  price_path_min_points: 2
+  price_path_require_nonempty: true
+  price_path_retry_attempts: 12
 
 simulation:
   max_open_positions: 1
