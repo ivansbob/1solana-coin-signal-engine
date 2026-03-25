@@ -326,6 +326,8 @@ def _write_unresolved_fixture(
     *,
     entry_decision: str = "ENTER",
     regime_decision: str = "SCALP",
+    entry_time: str | int = "2026-03-10T12:00:00Z",
+    entry_price: float | None = 1.0,
     price_path: list[dict] | None = None,
     truncated: bool = False,
 ) -> None:
@@ -335,8 +337,8 @@ def _write_unresolved_fixture(
         "pair_address": "pair_unresolved",
         "entry_decision": entry_decision,
         "regime_decision": regime_decision,
-        "entry_time": "2026-03-10T12:00:00Z",
-        "entry_price": 1.0,
+        "entry_time": entry_time,
+        "entry_price": entry_price,
     }]), encoding="utf-8")
     (artifact_dir / "scored_tokens.jsonl").write_text(json.dumps({
         "token_address": "tok_unresolved",
@@ -344,8 +346,8 @@ def _write_unresolved_fixture(
         "symbol": "UNR",
         "entry_decision": entry_decision,
         "regime_decision": regime_decision,
-        "entry_time": "2026-03-10T12:00:00Z",
-        "entry_price": 1.0,
+        "entry_time": entry_time,
+        "entry_price": entry_price,
         "price_usd": 1.0,
         "final_score": 40.0,
         "final_score_pre_wallet": 40.0,
@@ -534,6 +536,114 @@ def test_replay_generates_trade_observation_from_gap_filled_partial_path(tmp_pat
     result = run_historical_replay(artifact_dir=artifact_dir, run_id="unit_gap_fill_partial", config_path=ROOT / "config" / "replay.default.yaml", output_base_dir=tmp_path, dry_run=True)
     assert len(result["artifacts"].trades) == 1
     assert result["summary"]["gap_filled_rows_used"] >= 1
+
+
+def test_replay_derives_entry_price_from_historical_observation_when_missing_in_payload(tmp_path):
+    artifact_dir = tmp_path / "fixture_entry_bridge_exact_timestamp"
+    _write_unresolved_fixture(
+        artifact_dir,
+        entry_price=None,
+        entry_time=1774158360,
+        price_path=[
+            {"offset_sec": 0, "price": 1.0, "timestamp": 1774158360},
+            {"offset_sec": 30, "price": 1.1, "timestamp": 1774158390},
+        ],
+    )
+
+    result = run_historical_replay(artifact_dir=artifact_dir, run_id="unit_entry_bridge_exact", config_path=ROOT / "config" / "replay.default.yaml", output_base_dir=tmp_path, dry_run=True)
+    trade = result["artifacts"].trades[0]
+    assert trade["entry_price"] == 1.0
+    assert trade["entry_price_source"] == "historical_price_path"
+    assert trade["entry_price_timestamp"] == 1774158360
+
+
+def test_replay_uses_first_post_entry_observation_for_entry_price(tmp_path):
+    artifact_dir = tmp_path / "fixture_entry_bridge_first_post_entry"
+    _write_unresolved_fixture(
+        artifact_dir,
+        entry_price=None,
+        entry_time=1774158340,
+        price_path=[
+            {"offset_sec": 0, "price": 1.05, "timestamp": 1774158360},
+            {"offset_sec": 30, "price": 1.1, "timestamp": 1774158390},
+        ],
+    )
+
+    result = run_historical_replay(artifact_dir=artifact_dir, run_id="unit_entry_bridge_first_post", config_path=ROOT / "config" / "replay.default.yaml", output_base_dir=tmp_path, dry_run=True)
+    trade = result["artifacts"].trades[0]
+    assert trade["entry_price"] == 1.05
+    assert trade["entry_price_source"] == "historical_price_path"
+    assert trade["entry_price_timestamp"] == 1774158360
+
+
+def test_replay_keeps_entry_price_null_when_no_usable_observation_exists(tmp_path):
+    artifact_dir = tmp_path / "fixture_entry_bridge_no_usable_observation"
+    _write_unresolved_fixture(
+        artifact_dir,
+        entry_price=None,
+        entry_time=1774158500,
+        price_path=[
+            {"offset_sec": 0, "price": 1.0, "timestamp": 1774158360},
+            {"offset_sec": 30, "price": 1.1, "timestamp": 1774158390},
+        ],
+    )
+
+    result = run_historical_replay(artifact_dir=artifact_dir, run_id="unit_entry_bridge_none", config_path=ROOT / "config" / "replay.default.yaml", output_base_dir=tmp_path, dry_run=True)
+    trade = result["artifacts"].trades[0]
+    assert trade["entry_price"] is None
+    assert trade["replay_data_status"] == "historical_partial"
+
+
+def test_replay_accepts_gecko_timestamp_field_for_entry_price_bridge(tmp_path):
+    artifact_dir = tmp_path / "fixture_entry_bridge_gecko_shape"
+    _write_unresolved_fixture(
+        artifact_dir,
+        entry_price=None,
+        entry_time=1774158360,
+        price_path=[
+            {"offset_sec": 0, "price": 2.5e-06, "timestamp": 1774158360, "volume": 1758.95},
+            {"offset_sec": 45, "price": 3.0e-06, "timestamp": 1774158405, "volume": 1942.11},
+        ],
+    )
+
+    result = run_historical_replay(artifact_dir=artifact_dir, run_id="unit_entry_bridge_gecko", config_path=ROOT / "config" / "replay.default.yaml", output_base_dir=tmp_path, dry_run=True)
+    trade = result["artifacts"].trades[0]
+    assert trade["entry_price"] == 2.5e-06
+    assert trade["entry_price_source"] == "historical_price_path"
+    assert trade["entry_price_timestamp"] == 1774158360
+
+
+def test_replay_generates_non_null_pnl_when_entry_and_exit_prices_resolve_from_historical_path(tmp_path, monkeypatch):
+    artifact_dir = tmp_path / "fixture_entry_bridge_pnl"
+    _write_unresolved_fixture(
+        artifact_dir,
+        entry_price=None,
+        entry_time=1774158360,
+        price_path=[
+            {"offset_sec": 0, "price": 1.0, "timestamp": 1774158360},
+            {"offset_sec": 60, "price": 1.2, "timestamp": 1774158420},
+        ],
+    )
+
+    monkeypatch.setattr(replay_harness, "evaluate_hard_exit", lambda position_ctx, current, settings: {
+        "exit_decision": None,
+        "exit_reason": None,
+        "exit_flags": [],
+        "exit_warnings": [],
+    })
+    monkeypatch.setattr(replay_harness, "evaluate_scalp_exit", lambda position_ctx, current, settings: {
+        "exit_decision": "FULL_EXIT" if current.get("hold_sec", 0) >= 60 else None,
+        "exit_reason": "test_full_exit" if current.get("hold_sec", 0) >= 60 else None,
+        "exit_flags": ["test_full_exit"] if current.get("hold_sec", 0) >= 60 else [],
+        "exit_warnings": [],
+    })
+
+    result = run_historical_replay(artifact_dir=artifact_dir, run_id="unit_entry_bridge_pnl", config_path=ROOT / "config" / "replay.default.yaml", output_base_dir=tmp_path, dry_run=True)
+    trade = result["artifacts"].trades[0]
+    assert trade["entry_price"] == 1.0
+    assert trade["exit_price"] == 1.2
+    assert trade["gross_pnl_pct"] is not None
+    assert trade["net_pnl_pct"] is not None
 
 
 def test_historical_replay_ignored_token_still_does_not_emit_trade(tmp_path):
