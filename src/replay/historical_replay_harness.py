@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -210,6 +211,19 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+def _to_epoch_seconds(value: Any) -> int | None:
+    numeric = _safe_int(value)
+    if numeric is not None:
+        return numeric
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
+
+
 def _safe_wallet_features(*sources: dict[str, Any]) -> dict[str, Any]:
     features = dict(_DEFAULT_WALLET_FEATURES)
     for source in sources:
@@ -409,11 +423,36 @@ def _collect_observations(token_payload: dict[str, Any]) -> list[dict[str, Any]]
             rows.extend(obs for obs in observations if isinstance(obs, dict))
     rows.sort(
         key=lambda row: (
-            _safe_int(row.get("timestamp")) or 0,
+            _to_epoch_seconds(row.get("timestamp") or row.get("ts") or row.get("time")) or 0,
             float(row.get("offset_sec", row.get("elapsed_sec", row.get("t", 0))) or 0.0),
         )
     )
     return rows
+
+
+def _resolve_entry_price_from_historical_observation(entry: dict[str, Any], token_payload: dict[str, Any]) -> dict[str, Any]:
+    if entry.get("entry_price") is not None:
+        return entry
+
+    entry_ts = _to_epoch_seconds(entry.get("entry_time"))
+    if entry_ts is None:
+        return entry
+
+    for observation in _collect_observations(token_payload):
+        observation_ts = _to_epoch_seconds(observation.get("timestamp") or observation.get("ts") or observation.get("time"))
+        if observation_ts is None or observation_ts < entry_ts:
+            continue
+        observation_price = _safe_float(observation.get("price") if "price" in observation else observation.get("price_usd"))
+        if observation_price is None:
+            continue
+        return {
+            **entry,
+            "entry_price": observation_price,
+            "entry_price_source": "historical_price_path",
+            "entry_price_timestamp": observation.get("timestamp") or observation.get("ts") or observation.get("time") or observation_ts,
+        }
+
+    return entry
 
 
 def _augment_current_context(base: dict[str, Any], observation: dict[str, Any], entry_price: float | None) -> dict[str, Any]:
@@ -535,10 +574,13 @@ def _estimate_replay_exit_pnl(current: dict[str, Any], position_ctx: dict[str, A
 
 def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_payload: dict[str, Any], regime_decision: str, state: ReplayStateMachine, settings: Any) -> dict[str, Any]:
     observations = _collect_observations(token_payload)
-    entry_ts = _safe_int(entry.get("entry_time"))
+    entry_ts = _to_epoch_seconds(entry.get("entry_time"))
     usable_observations = observations
     if entry_ts is not None:
-        usable_observations = [obs for obs in observations if (_safe_int(obs.get("timestamp")) or 0) >= entry_ts]
+        usable_observations = [
+            obs for obs in observations
+            if (_to_epoch_seconds(obs.get("timestamp") or obs.get("ts") or obs.get("time")) or 0) >= entry_ts
+        ]
     price_path_missing = not observations
     no_post_entry_points = bool(observations) and not usable_observations
     price_path_truncated = any(bool(path.get("truncated")) for path in (token_payload.get("price_paths") or []))
@@ -1038,6 +1080,7 @@ def replay_token_lifecycle(
         }
 
     entry = _extract_entry_context(base_context, token_payload)
+    entry = _resolve_entry_price_from_historical_observation(entry, token_payload)
     if entry.get("entry_price") is None:
         missing_evidence.append("entry_price")
     state.open_position(entry_time=entry["entry_time"], entry_price=entry.get("entry_price"))
@@ -1073,6 +1116,8 @@ def replay_token_lifecycle(
         "entry_ts": entry["entry_time"],
         "entry_time": entry["entry_time"],
         "entry_price": entry.get("entry_price"),
+        "entry_price_source": entry.get("entry_price_source"),
+        "entry_price_timestamp": entry.get("entry_price_timestamp"),
         "exit_ts": exit_payload.get("exit_time"),
         "exit_time": exit_payload.get("exit_time"),
         "exit_price": exit_payload.get("exit_price"),
@@ -1109,6 +1154,8 @@ def replay_token_lifecycle(
         "closed_at": exit_payload.get("exit_time"),
         "warnings": [*missing_evidence, *(exit_payload.get("exit_warnings") or [])],
         "entry_price": entry.get("entry_price"),
+        "entry_price_source": entry.get("entry_price_source"),
+        "entry_price_timestamp": entry.get("entry_price_timestamp"),
         "exit_price": exit_payload.get("exit_price"),
         "gross_pnl_pct": exit_payload.get("gross_pnl_pct"),
         "net_pnl_pct": exit_payload.get("net_pnl_pct"),
