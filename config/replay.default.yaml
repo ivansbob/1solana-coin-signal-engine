@@ -26,8 +26,8 @@ backfill:
   collect_price_paths: true
   price_history_enabled: true
   price_history_provider: geckoterminal_pool_ohlcv
-  price_path_window_sec: 3600
-  price_path_window_max_sec: 7200
+  price_path_window_sec: 14400
+  price_path_window_max_sec: 28800
   price_interval_sec: 60
   price_interval_fallbacks: [300, 900]
   price_path_window_fallback_multipliers: [4, 8]
