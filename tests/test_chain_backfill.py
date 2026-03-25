@@ -406,6 +406,75 @@ def test_collect_price_paths_runs_attempts_after_derived_start_ts(monkeypatch):
     assert TrackingClient.seen_start_ts[0] == 1_773_619_200
 
 
+def test_chain_backfill_preserves_gap_fill_metadata(monkeypatch):
+    class GapFillClient(FakePriceHistoryClient):
+        def fetch_price_path(self, **kwargs):
+            row = super().fetch_price_path(**kwargs)
+            row.update({
+                "gap_fill_applied": True,
+                "gap_fill_count": 2,
+                "observed_row_count": 2,
+                "densified_row_count": 4,
+                "obs_len": 4,
+            })
+            return row
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", GapFillClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "pair_created_at_ts": 1000},
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+    assert result["gap_fill_applied"] is True
+    assert result["gap_fill_count"] == 2
+    assert result["observed_row_count"] == 2
+    assert result["densified_row_count"] == 4
+
+
+def test_chain_backfill_keeps_partial_nonempty_path_as_partial(monkeypatch):
+    class PartialNonEmptyClient(FakePriceHistoryClient):
+        def fetch_price_path(self, **kwargs):
+            row = super().fetch_price_path(**kwargs)
+            row.update({"price_path_status": "partial", "truncated": True, "missing": False})
+            return row
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", PartialNonEmptyClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "pair_created_at_ts": 1000},
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+    assert result["price_path_status"] == "partial"
+    assert result["missing"] is False
+    assert len(result["price_path"]) > 0
+
+
+def test_chain_backfill_marks_missing_only_when_usable_rows_empty(monkeypatch):
+    class EmptyUsableClient(FakePriceHistoryClient):
+        def fetch_price_path(self, **kwargs):
+            row = super().fetch_price_path(**kwargs)
+            row.update(
+                {
+                    "price_path": [],
+                    "obs_len": 0,
+                    "provider_row_count": 3,
+                    "http_status": 200,
+                    "price_path_status": "partial",
+                    "missing": False,
+                }
+            )
+            return row
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", EmptyUsableClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "pair_created_at_ts": 1000},
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+    assert result["price_path_status"] == "missing"
+    assert result["missing"] is True
+
+
 class HydrationTrackingRpcClient:
     def __init__(self, *args, **kwargs):
         self.calls = []

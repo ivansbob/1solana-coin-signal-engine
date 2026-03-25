@@ -277,3 +277,62 @@ def test_fetch_price_path_paginates_backwards_with_before_timestamp_when_range_e
     assert len(client.fetch_calls) == 2
     assert client.fetch_calls[1]["end_ts"] == 1059
     assert [point["timestamp"] for point in result["price_path"]] == [1000, 1060, 1120]
+
+
+def test_normalize_gecko_sparse_internal_gap_applies_gap_fill():
+    client = GeckoTerminalClient()
+    rows = [[100, 1, 1, 1, 1.0, 5], [280, 1, 1, 1, 1.2, 7]]
+
+    normalized, meta = client._normalize_geckoterminal_ohlcv_list(rows, start_ts=100, end_ts=280, interval_sec=60)
+
+    assert [row["timestamp"] for row in normalized] == [100, 160, 220, 280]
+    assert normalized[1]["price"] == 1.0
+    assert normalized[1]["volume"] == 0.0
+    assert meta["gap_fill_applied"] is True
+    assert meta["gap_fill_count"] == 2
+
+
+def test_normalize_gecko_does_not_fill_before_first_observed_row():
+    client = GeckoTerminalClient()
+    rows = [[280, 1, 1, 1, 1.2, 7], [340, 1, 1, 1, 1.3, 8]]
+
+    normalized, _ = client._normalize_geckoterminal_ohlcv_list(rows, start_ts=100, end_ts=340, interval_sec=60)
+
+    assert [row["timestamp"] for row in normalized] == [280, 340]
+
+
+def test_normalize_gecko_does_not_fill_after_last_observed_row():
+    client = GeckoTerminalClient()
+    rows = [[100, 1, 1, 1, 1.0, 7]]
+
+    normalized, meta = client._normalize_geckoterminal_ohlcv_list(rows, start_ts=100, end_ts=340, interval_sec=60)
+
+    assert [row["timestamp"] for row in normalized] == [100]
+    assert meta["gap_fill_applied"] is False
+    assert meta["gap_fill_count"] == 0
+
+
+def test_fetch_gecko_price_path_reports_gap_fill_metadata():
+    client = GeckoTerminalClient(
+        resolver_result={"pool_address": "pool-1", "resolver_source": "geckoterminal", "resolver_confidence": "high", "pool_candidates_seen": 1, "pool_resolution_status": "resolved"},
+        ohlcv_payloads=[{"data": {"attributes": {"ohlcv_list": [[100, 1, 1, 1, 1.0, 1], [280, 1, 1, 1, 1.2, 2]]}}}],
+    )
+    result = client.fetch_price_path(token_address="tok", start_ts=100, end_ts=280, interval_sec=60)
+
+    assert result["gap_fill_applied"] is True
+    assert result["gap_fill_count"] == 2
+    assert result["observed_row_count"] == 2
+    assert result["densified_row_count"] == 4
+    assert result["price_path_origin"] == "provider_observed_plus_gap_fill"
+
+
+def test_fetch_gecko_price_path_keeps_partial_status_when_nonempty():
+    client = GeckoTerminalClient(
+        resolver_result={"pool_address": "pool-1", "resolver_source": "geckoterminal", "resolver_confidence": "high", "pool_candidates_seen": 1, "pool_resolution_status": "resolved"},
+        ohlcv_payloads=[{"data": {"attributes": {"ohlcv_list": [[100, 1, 1, 1, 1.0, 1]]}}}],
+    )
+    result = client.fetch_price_path(token_address="tok", start_ts=100, end_ts=280, interval_sec=60)
+
+    assert result["price_path_status"] == "partial"
+    assert result["missing"] is False
+    assert result["obs_len"] == 1

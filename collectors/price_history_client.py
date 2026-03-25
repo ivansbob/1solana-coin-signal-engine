@@ -802,28 +802,69 @@ class PriceHistoryClient:
         rows = attributes.get("ohlcv_list")
         return [row for row in rows if isinstance(row, list) and len(row) >= 6] if isinstance(rows, list) else []
 
-    def _normalize_geckoterminal_ohlcv_list(self, rows: list[list[Any]], *, start_ts: int | None, end_ts: int | None) -> list[dict[str, Any]]:
-        observations: list[dict[str, Any]] = []
+    def _normalize_geckoterminal_ohlcv_list(
+        self,
+        rows: list[list[Any]],
+        *,
+        start_ts: int | None,
+        end_ts: int | None,
+        interval_sec: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        observed_rows: list[dict[str, Any]] = []
         seen: set[int] = set()
         for row in rows:
             ts = _coerce_int(row[0] if len(row) > 0 else None)
-            price = _coerce_float(row[4] if len(row) > 4 else None)
+            close = _coerce_float(row[4] if len(row) > 4 else None)
             volume = _coerce_float(row[5] if len(row) > 5 else None)
-            if ts is None or price is None or ts in seen:
+            if ts is None or close is None or ts in seen:
                 continue
             if start_ts is not None and ts < start_ts:
                 continue
             if end_ts is not None and ts > end_ts:
                 continue
             seen.add(ts)
-            observations.append({
+            observed_rows.append({
                 "timestamp": ts,
                 "offset_sec": max(0, ts - int(start_ts or ts)),
-                "price": price,
+                "price": close,
                 "volume": volume,
             })
-        observations.sort(key=lambda item: item["timestamp"])
-        return observations
+        observed_rows.sort(key=lambda item: item["timestamp"])
+
+        densified: list[dict[str, Any]] = []
+        gap_fill_count = 0
+        if observed_rows:
+            densified.append(dict(observed_rows[0]))
+        for idx in range(1, len(observed_rows)):
+            prev = observed_rows[idx - 1]
+            current = observed_rows[idx]
+            prev_ts = int(prev["timestamp"])
+            current_ts = int(current["timestamp"])
+            prev_close = _coerce_float(prev.get("price"))
+            if interval_sec > 0 and prev_close is not None and current_ts > prev_ts:
+                step = prev_ts + interval_sec
+                while step < current_ts:
+                    densified.append(
+                        {
+                            "timestamp": int(step),
+                            "offset_sec": max(0, int(step) - int(start_ts or step)),
+                            "price": prev_close,
+                            "volume": 0.0,
+                            "gap_filled": True,
+                        }
+                    )
+                    gap_fill_count += 1
+                    step += interval_sec
+            densified.append(dict(current))
+
+        metadata = {
+            "gap_fill_applied": gap_fill_count > 0,
+            "gap_fill_count": gap_fill_count,
+            "observed_row_count": len(observed_rows),
+            "densified_row_count": len(densified),
+            "price_path_origin": "provider_observed_plus_gap_fill" if gap_fill_count > 0 else "provider_observed",
+        }
+        return densified, metadata
 
     def _fetch_geckoterminal_price_path(
         self,
@@ -899,6 +940,12 @@ class PriceHistoryClient:
                 "interval_sec": interval_sec,
                 "request_params": request_params,
                 "provider_row_count": 0,
+                "obs_len": 0,
+                "gap_fill_applied": False,
+                "gap_fill_count": 0,
+                "observed_row_count": 0,
+                "densified_row_count": 0,
+                "price_path_origin": "provider_observed",
                 "price_path": [],
                 "truncated": False,
                 "missing": True,
@@ -937,7 +984,12 @@ class PriceHistoryClient:
                 break
             seen_oldest.add(oldest_ts)
             before_ts = oldest_ts - 1
-        observations = self._normalize_geckoterminal_ohlcv_list(raw_rows, start_ts=start_ts, end_ts=end_ts)
+        observations, densify_metadata = self._normalize_geckoterminal_ohlcv_list(
+            raw_rows,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            interval_sec=interval_sec,
+        )
         missing = not observations
         truncated = bool(end_ts is not None and observations and observations[-1]["timestamp"] < int(end_ts))
         if missing:
@@ -964,6 +1016,12 @@ class PriceHistoryClient:
             "interval_sec": interval_sec,
             "request_params": request_params,
             "provider_row_count": len(raw_rows),
+            "obs_len": len(observations),
+            "gap_fill_applied": bool(densify_metadata.get("gap_fill_applied")),
+            "gap_fill_count": int(densify_metadata.get("gap_fill_count") or 0),
+            "observed_row_count": int(densify_metadata.get("observed_row_count") or 0),
+            "densified_row_count": int(densify_metadata.get("densified_row_count") or 0),
+            "price_path_origin": densify_metadata.get("price_path_origin") or "provider_observed",
             "price_path": observations,
             "truncated": truncated,
             "missing": missing,

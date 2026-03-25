@@ -460,6 +460,82 @@ def test_historical_replay_emits_partial_trade_when_only_partial_exit_is_seen(tm
     assert len(result["artifacts"].trade_feature_matrix) == 1
 
 
+def test_replay_uses_partial_historical_row_when_post_entry_points_exist(tmp_path):
+    artifact_dir = tmp_path / "fixture_partial_usable"
+    _write_unresolved_fixture(
+        artifact_dir,
+        price_path=[
+            {"timestamp": 100, "offset_sec": 0, "price": 1.0},
+            {"timestamp": 160, "offset_sec": 60, "price": 1.1},
+            {"timestamp": 220, "offset_sec": 120, "price": 1.2},
+        ],
+    )
+    rows = json.loads((artifact_dir / "price_paths.json").read_text(encoding="utf-8"))
+    rows[0]["price_path_status"] = "partial"
+    (artifact_dir / "price_paths.json").write_text(json.dumps(rows), encoding="utf-8")
+    entries = json.loads((artifact_dir / "entry_candidates.json").read_text(encoding="utf-8"))
+    entries[0]["entry_time"] = 100
+    (artifact_dir / "entry_candidates.json").write_text(json.dumps(entries), encoding="utf-8")
+
+    result = run_historical_replay(artifact_dir=artifact_dir, run_id="unit_partial_usable", config_path=ROOT / "config" / "replay.default.yaml", output_base_dir=tmp_path, dry_run=True)
+
+    assert result["summary"]["historical_rows_used"] == 1
+    assert result["summary"]["partial_but_usable_rows"] == 1
+    assert result["summary"]["unresolved_rows"] == 0
+
+
+def test_replay_marks_unresolved_when_no_post_entry_points_exist(tmp_path):
+    artifact_dir = tmp_path / "fixture_no_post_entry"
+    _write_unresolved_fixture(
+        artifact_dir,
+        price_path=[
+            {"timestamp": 100, "offset_sec": 0, "price": 1.0},
+            {"timestamp": 120, "offset_sec": 20, "price": 1.1},
+        ],
+    )
+    rows = json.loads((artifact_dir / "price_paths.json").read_text(encoding="utf-8"))
+    rows[0]["price_path_status"] = "partial"
+    (artifact_dir / "price_paths.json").write_text(json.dumps(rows), encoding="utf-8")
+    entries = json.loads((artifact_dir / "entry_candidates.json").read_text(encoding="utf-8"))
+    entries[0]["entry_time"] = 200
+    (artifact_dir / "entry_candidates.json").write_text(json.dumps(entries), encoding="utf-8")
+
+    result = run_historical_replay(artifact_dir=artifact_dir, run_id="unit_no_post_entry", config_path=ROOT / "config" / "replay.default.yaml", output_base_dir=tmp_path, dry_run=True)
+    trade = result["artifacts"].trades[0]
+    assert trade["replay_resolution_status"] == "unresolved"
+    assert "missing_price_path" in (trade.get("exit_warnings") or [])
+
+
+def test_replay_summary_counts_partial_but_usable_rows(tmp_path):
+    artifact_dir = FIXTURES / "full_win"
+    result = run_historical_replay(artifact_dir=artifact_dir, run_id="unit_summary_partial_usable", config_path=ROOT / "config" / "replay.default.yaml", output_base_dir=tmp_path, dry_run=True)
+    assert "partial_but_usable_rows" in result["summary"]
+    assert "missing_price_path_rows" in result["summary"]
+
+
+def test_replay_generates_trade_observation_from_gap_filled_partial_path(tmp_path):
+    artifact_dir = tmp_path / "fixture_gap_fill_partial"
+    _write_unresolved_fixture(
+        artifact_dir,
+        price_path=[
+            {"timestamp": 100, "offset_sec": 0, "price": 1.0},
+            {"timestamp": 160, "offset_sec": 60, "price": 1.05, "gap_filled": True},
+            {"timestamp": 220, "offset_sec": 120, "price": 1.1, "gap_filled": True},
+        ],
+    )
+    rows = json.loads((artifact_dir / "price_paths.json").read_text(encoding="utf-8"))
+    rows[0]["price_path_status"] = "partial"
+    rows[0]["gap_fill_applied"] = True
+    (artifact_dir / "price_paths.json").write_text(json.dumps(rows), encoding="utf-8")
+    entries = json.loads((artifact_dir / "entry_candidates.json").read_text(encoding="utf-8"))
+    entries[0]["entry_time"] = 100
+    (artifact_dir / "entry_candidates.json").write_text(json.dumps(entries), encoding="utf-8")
+
+    result = run_historical_replay(artifact_dir=artifact_dir, run_id="unit_gap_fill_partial", config_path=ROOT / "config" / "replay.default.yaml", output_base_dir=tmp_path, dry_run=True)
+    assert len(result["artifacts"].trades) == 1
+    assert result["summary"]["gap_filled_rows_used"] >= 1
+
+
 def test_historical_replay_ignored_token_still_does_not_emit_trade(tmp_path):
     artifact_dir = tmp_path / "fixture_ignored_emit_contract"
     _write_unresolved_fixture(artifact_dir, entry_decision="IGNORE")

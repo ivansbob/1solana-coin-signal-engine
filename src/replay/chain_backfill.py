@@ -558,6 +558,10 @@ def _build_missing_price_path(
     pool_resolver_confidence: str | None = None,
     pool_candidates_seen: int | None = None,
     pool_resolution_status: str | None = None,
+    gap_fill_applied: bool = False,
+    gap_fill_count: int = 0,
+    observed_row_count: int = 0,
+    densified_row_count: int = 0,
 ) -> dict[str, Any]:
     return {
         "token_address": token,
@@ -598,6 +602,10 @@ def _build_missing_price_path(
         "pool_resolver_confidence": pool_resolver_confidence,
         "pool_candidates_seen": pool_candidates_seen,
         "pool_resolution_status": pool_resolution_status,
+        "gap_fill_applied": bool(gap_fill_applied),
+        "gap_fill_count": int(gap_fill_count or 0),
+        "observed_row_count": int(observed_row_count or 0),
+        "densified_row_count": int(densified_row_count or 0),
     }
 
 
@@ -965,9 +973,13 @@ def _collect_price_paths(
             "time_anchor_candidates": list(start_context.get("time_anchor_candidates") or []),
             "time_anchor_discarded_candidates": list(start_context.get("time_anchor_discarded_candidates") or []),
             "time_anchor_preference_applied": bool(start_context.get("time_anchor_preference_applied")),
+            "gap_fill_applied": bool(enriched.get("gap_fill_applied")),
+            "gap_fill_count": int(enriched.get("gap_fill_count") or 0),
+            "observed_row_count": int(enriched.get("observed_row_count") or 0),
+            "densified_row_count": int(enriched.get("densified_row_count") or 0),
         }
     )
-    if _price_path_points(enriched) == 0:
+    if _price_path_points(enriched) == 0 and int(enriched.get("obs_len") or 0) <= 0:
         enriched["missing"] = True
         enriched["price_path_status"] = "missing"
         enriched["warning"] = enriched.get("warning") or "price_path_attempts_exhausted"
