@@ -507,6 +507,9 @@ def _extract_rows(payload: Any) -> list[dict[str, Any]]:
 
 
 class PriceHistoryClient:
+    _gecko_global_next_request_at: float = 0.0
+    _gecko_global_cooldown_until: float = 0.0
+
     def __init__(
         self,
         *,
@@ -529,6 +532,9 @@ class PriceHistoryClient:
         pool_resolver: str | None = None,
         resolver_cache_ttl_sec: int = 0,
         max_ohlcv_limit: int = 1000,
+        gecko_min_request_interval_sec: float = 0.0,
+        gecko_rate_limit_cooldown_sec: float = 15.0,
+        gecko_max_pages_per_token: int = 12,
     ) -> None:
         self.base_url = str(base_url or "").strip().rstrip("/")
         self.api_key = str(api_key or "").strip()
@@ -549,6 +555,9 @@ class PriceHistoryClient:
         self.pool_resolver = str(pool_resolver or "").strip() or None
         self.resolver_cache_ttl_sec = max(int(resolver_cache_ttl_sec or 0), 0)
         self.max_ohlcv_limit = min(max(int(max_ohlcv_limit or 1000), 1), 1000)
+        self.gecko_min_request_interval_sec = max(float(gecko_min_request_interval_sec or 0.0), 0.0)
+        self.gecko_rate_limit_cooldown_sec = max(float(gecko_rate_limit_cooldown_sec or 0.0), 0.0)
+        self.gecko_max_pages_per_token = max(int(gecko_max_pages_per_token or 1), 1)
         self._resolver_cache: dict[str, tuple[int, dict[str, Any]]] = {}
 
     def provider_bootstrap(self) -> dict[str, Any]:
@@ -591,8 +600,33 @@ class PriceHistoryClient:
                 "pool_resolver": self.pool_resolver,
                 "resolver_cache_ttl_sec": self.resolver_cache_ttl_sec,
                 "max_ohlcv_limit": self.max_ohlcv_limit,
+                "gecko_min_request_interval_sec": self.gecko_min_request_interval_sec,
+                "gecko_rate_limit_cooldown_sec": self.gecko_rate_limit_cooldown_sec,
+                "gecko_max_pages_per_token": self.gecko_max_pages_per_token,
             },
         }
+
+    def _acquire_gecko_request_slot(self) -> None:
+        now = time.monotonic()
+        wait_until = max(
+            float(self.__class__._gecko_global_next_request_at),
+            float(self.__class__._gecko_global_cooldown_until),
+        )
+        if wait_until > now:
+            time.sleep(wait_until - now)
+        self.__class__._gecko_global_next_request_at = time.monotonic() + self.gecko_min_request_interval_sec
+
+    def _gecko_get(self, endpoint: str, params: dict[str, Any], headers: dict[str, str] | None = None) -> Any:
+        self._acquire_gecko_request_slot()
+        payload = self._get(endpoint, params, headers=headers)
+        if isinstance(payload, dict) and (
+            payload.get("warning") == "provider_rate_limited" or int(payload.get("http_status") or 0) == 429
+        ):
+            self.__class__._gecko_global_cooldown_until = max(
+                float(self.__class__._gecko_global_cooldown_until),
+                time.monotonic() + self.gecko_rate_limit_cooldown_sec,
+            )
+        return payload
 
     def _get(self, endpoint: str, params: dict[str, Any], headers: dict[str, str] | None = None) -> Any:
         if not self.base_url:
@@ -766,7 +800,7 @@ class PriceHistoryClient:
             params["token"] = self.token_side
         if self.request_version:
             params["request_version"] = self.request_version
-        payload = self._with_provider_rate_limit_retry(lambda: self._get(endpoint, params))
+        payload = self._gecko_get(endpoint, params)
         pools = self._extract_geckoterminal_pool_candidates(payload)
         selected = self._select_canonical_pool(pools)
         result = {
@@ -812,7 +846,7 @@ class PriceHistoryClient:
         }
         if self.request_version:
             params["request_version"] = self.request_version
-        return self._get(endpoint, params)
+        return self._gecko_get(endpoint, params)
 
     def _extract_geckoterminal_ohlcv_rows(self, payload: Any) -> list[list[Any]]:
         if not isinstance(payload, dict):
@@ -907,6 +941,9 @@ class PriceHistoryClient:
             "interval_label": _interval_label(interval_sec),
             "limit": limit,
             "request_kind": "pool_ohlcv",
+            "gecko_min_request_interval_sec": self.gecko_min_request_interval_sec,
+            "gecko_rate_limit_cooldown_sec": self.gecko_rate_limit_cooldown_sec,
+            "gecko_max_pages_per_token": self.gecko_max_pages_per_token,
         })
         network = self._geckoterminal_network()
         resolver_endpoint = self._format_endpoint(self.token_endpoint, network=network, token_address=token_address)
@@ -919,8 +956,14 @@ class PriceHistoryClient:
             "warning": None,
             "endpoint": resolver_endpoint if pair_address else None,
             "http_status": None,
+            "pool_resolution_http_status": None,
+            "ohlcv_http_status": None,
             "provider_error_message": None,
             "provider_error_body": None,
+            "terminated_on_rate_limit": False,
+            "rate_limit_stage": "unknown",
+            "ohlcv_pages_attempted": 0,
+            "ohlcv_pages_succeeded": 0,
         }
         if not pair_address:
             pool_info = self._resolve_geckoterminal_pool(token_address, network=network)
@@ -933,7 +976,7 @@ class PriceHistoryClient:
             "pool_candidates_seen": pool_info.get("pool_candidates_seen"),
             "pool_resolution_status": pool_info.get("pool_resolution_status"),
             "endpoint": pool_info.get("endpoint"),
-            "http_status": pool_info.get("http_status"),
+            "pool_resolution_http_status": pool_info.get("http_status"),
             "provider_error_message": pool_info.get("provider_error_message"),
             "provider_error_body": pool_info.get("provider_error_body"),
         })
@@ -946,6 +989,9 @@ class PriceHistoryClient:
             "interval_sec": interval_sec,
             "limit": limit,
         }
+        resolver_rate_limited = (
+            pool_info.get("warning") == "provider_rate_limited" or int(pool_info.get("http_status") or 0) == 429
+        )
         if not selected_pool_address:
             return {
                 "token_address": token_address,
@@ -980,9 +1026,15 @@ class PriceHistoryClient:
                 "warning": pool_info.get("warning") or "pool_resolution_failed",
                 "endpoint": pool_info.get("endpoint"),
                 "http_status": pool_info.get("http_status"),
+                "pool_resolution_http_status": pool_info.get("http_status"),
+                "ohlcv_http_status": None,
                 "provider_error_message": pool_info.get("provider_error_message"),
                 "provider_error_body": pool_info.get("provider_error_body"),
                 "provider_error_payload": None,
+                "terminated_on_rate_limit": resolver_rate_limited,
+                "rate_limit_stage": "resolver" if resolver_rate_limited else "unknown",
+                "ohlcv_pages_attempted": 0,
+                "ohlcv_pages_succeeded": 0,
             }
         ohlcv_endpoint = self._format_endpoint(self.pair_endpoint, network=network, pool_address=selected_pool_address, timeframe="minute")
         request_summary["endpoint"] = ohlcv_endpoint
@@ -991,32 +1043,45 @@ class PriceHistoryClient:
         warning = None
         endpoint = ohlcv_endpoint
         http_status = None
+        pool_resolution_http_status = pool_info.get("http_status")
+        ohlcv_http_status = None
         provider_error_message = None
         provider_error_body = None
+        terminated_on_rate_limit = False
+        rate_limit_stage = "unknown"
+        ohlcv_pages_attempted = 0
+        ohlcv_pages_succeeded = 0
         seen_oldest: set[int] = set()
-        while True:
-            payload = self._with_provider_rate_limit_retry(
-                lambda: self._fetch_geckoterminal_pool_ohlcv(
-                    selected_pool_address,
-                    start_ts=start_ts,
-                    end_ts=before_ts,
-                    interval_sec=interval_sec,
-                    limit=min(limit, self.max_ohlcv_limit),
-                    network=network,
-                )
+        max_page_limit = min(max(limit, 1), self.max_ohlcv_limit)
+        while ohlcv_pages_attempted < self.gecko_max_pages_per_token:
+            ohlcv_pages_attempted += 1
+            payload = self._fetch_geckoterminal_pool_ohlcv(
+                selected_pool_address,
+                start_ts=start_ts,
+                end_ts=before_ts,
+                interval_sec=interval_sec,
+                limit=max_page_limit,
+                network=network,
             )
             batch = self._extract_geckoterminal_ohlcv_rows(payload)
             raw_rows.extend(batch)
             if isinstance(payload, dict):
                 warning = payload.get("warning") or warning
-                http_status = payload.get("http_status", http_status)
+                ohlcv_http_status = payload.get("http_status", ohlcv_http_status)
+                http_status = ohlcv_http_status
                 provider_error_message = payload.get("provider_error_message", provider_error_message)
                 provider_error_body = payload.get("provider_error_body", provider_error_body)
                 endpoint = payload.get("endpoint") or endpoint
+                if warning == "provider_rate_limited" or int(ohlcv_http_status or 0) == 429:
+                    terminated_on_rate_limit = True
+                    rate_limit_stage = "ohlcv"
+                    break
+            if batch:
+                ohlcv_pages_succeeded += 1
             if not batch:
                 break
             oldest_ts = min(_coerce_int(row[0]) or 0 for row in batch)
-            if oldest_ts <= int(start_ts or oldest_ts) or len(batch) < min(limit, self.max_ohlcv_limit) or oldest_ts in seen_oldest:
+            if oldest_ts <= int(start_ts or oldest_ts) or len(batch) < max_page_limit or oldest_ts in seen_oldest:
                 break
             seen_oldest.add(oldest_ts)
             before_ts = oldest_ts - 1
@@ -1030,8 +1095,9 @@ class PriceHistoryClient:
         truncated = bool(end_ts is not None and observations and observations[-1]["timestamp"] < int(end_ts))
         if missing:
             warning = warning or "no_pool_ohlcv_rows"
-        elif truncated:
+        elif terminated_on_rate_limit or truncated:
             warning = warning or "price_path_incomplete"
+        status = "missing" if missing else ("partial" if (terminated_on_rate_limit or truncated) else "complete")
         return {
             "token_address": token_address,
             "pair_address": pair_address,
@@ -1061,13 +1127,19 @@ class PriceHistoryClient:
             "price_path": observations,
             "truncated": truncated,
             "missing": missing,
-            "price_path_status": "missing" if missing else ("partial" if truncated else "complete"),
+            "price_path_status": status,
             "warning": warning,
             "endpoint": endpoint,
             "http_status": http_status,
+            "pool_resolution_http_status": pool_resolution_http_status,
+            "ohlcv_http_status": ohlcv_http_status,
             "provider_error_message": provider_error_message,
             "provider_error_body": provider_error_body,
             "provider_error_payload": None,
+            "terminated_on_rate_limit": terminated_on_rate_limit,
+            "rate_limit_stage": rate_limit_stage,
+            "ohlcv_pages_attempted": ohlcv_pages_attempted,
+            "ohlcv_pages_succeeded": ohlcv_pages_succeeded,
         }
 
     def fetch_price_path(

@@ -851,6 +851,39 @@ class GeckoMissingRowsClient:
         }
 
 
+class GeckoRateLimitedClient:
+    def __init__(self, *args, **kwargs):
+        self.calls = 0
+
+    def fetch_price_path(self, **kwargs):
+        self.calls += 1
+        return {
+            "token_address": kwargs["token_address"],
+            "pair_address": kwargs.get("pair_address"),
+            "selected_pool_address": "resolved-pool",
+            "pool_address": "resolved-pool",
+            "pool_resolver_source": "geckoterminal",
+            "pool_resolver_confidence": "high",
+            "pool_candidates_seen": 1,
+            "pool_resolution_status": "resolved",
+            "source_provider": "geckoterminal_pool_ohlcv",
+            "requested_start_ts": kwargs.get("start_ts"),
+            "requested_end_ts": kwargs.get("end_ts"),
+            "interval_sec": kwargs.get("interval_sec"),
+            "price_path": [{"timestamp": kwargs.get("start_ts"), "offset_sec": 0, "price": 1.0}] if self.calls == 1 else [],
+            "truncated": True,
+            "missing": False if self.calls == 1 else True,
+            "price_path_status": "partial" if self.calls == 1 else "missing",
+            "warning": "provider_rate_limited",
+            "terminated_on_rate_limit": True,
+            "rate_limit_stage": "ohlcv",
+            "ohlcv_pages_attempted": 1,
+            "ohlcv_pages_succeeded": 0,
+            "pool_resolution_http_status": 200,
+            "ohlcv_http_status": 429,
+        }
+
+
 def test_collect_price_paths_embeds_selected_pool_address_from_provider_result(monkeypatch):
     monkeypatch.setattr(chain_backfill, "PriceHistoryClient", GeckoBackfillClient)
     result = chain_backfill._collect_price_paths(
@@ -959,3 +992,29 @@ def test_collect_price_paths_preserves_best_partial_result_for_geckoterminal_pro
 
     assert result["interval_sec"] == 300
     assert len(result["price_path"]) == 3
+
+
+def test_chain_backfill_summary_counts_rate_limited_partials_and_missing():
+    rows = [
+        {
+            "token_address": "tok-1",
+            "price_paths": [
+                {"terminated_on_rate_limit": True, "rate_limit_stage": "ohlcv", "price_path_status": "partial"},
+                {"terminated_on_rate_limit": True, "rate_limit_stage": "resolver", "price_path_status": "missing"},
+            ],
+        },
+        {
+            "token_address": "tok-2",
+            "price_paths": [
+                {"terminated_on_rate_limit": True, "rate_limit_stage": "ohlcv", "price_path_status": "missing"},
+                {"terminated_on_rate_limit": False, "rate_limit_stage": "ohlcv", "price_path_status": "partial"},
+            ],
+        },
+    ]
+
+    summary = chain_backfill.summarize_rate_limited_price_paths(rows)
+
+    assert summary["rate_limited_partial_rows"] == 1
+    assert summary["rate_limited_missing_rows"] == 2
+    assert summary["resolver_stage_rate_limits"] == 1
+    assert summary["ohlcv_stage_rate_limits"] == 2
