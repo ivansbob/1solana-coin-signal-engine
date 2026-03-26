@@ -473,3 +473,78 @@ def test_fetch_gecko_price_path_preserves_resolver_observability_when_pool_missi
     assert result["provider_error_message"] == "rate limit"
     assert result["provider_error_body"] == "{\"error\":\"limit\"}"
     assert result["provider_request_summary"]["endpoint"] == "networks/solana/tokens/tok/pools"
+
+
+def test_gecko_ohlcv_404_is_classified_non_retryable_and_not_cached_on_first_hit():
+    client = GeckoTerminalClient(
+        resolver_result={
+            "pool_address": "pool-404",
+            "resolver_source": "geckoterminal",
+            "resolver_confidence": "high",
+            "pool_candidates_seen": 1,
+            "pool_resolution_status": "resolved",
+        },
+        ohlcv_payloads=[{"warning": "provider_http_error", "http_status": 404}],
+    )
+
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1060, interval_sec=60, limit=2)
+
+    assert result["provider_failure_class"] == "ohlcv_not_available"
+    assert result["provider_failure_retryable"] is False
+    assert result["negative_cache_hit"] is False
+    assert result["cooldown_applied"] is False
+
+
+def test_gecko_subsequent_404_uses_negative_cache_without_http_request():
+    client = GeckoTerminalClient(
+        ohlcv_payloads=[{"warning": "provider_http_error", "http_status": 404}],
+        gecko_ohlcv_404_negative_ttl_sec=1800,
+    )
+
+    first = client.fetch_price_path(
+        token_address="tok",
+        pair_address="pool-404",
+        start_ts=1000,
+        end_ts=1060,
+        interval_sec=60,
+        limit=2,
+    )
+    second = client.fetch_price_path(
+        token_address="tok",
+        pair_address="pool-404",
+        start_ts=1000,
+        end_ts=1060,
+        interval_sec=60,
+        limit=2,
+    )
+
+    assert first["provider_failure_class"] == "ohlcv_not_available"
+    assert first["negative_cache_hit"] is False
+    assert len(client.fetch_calls) == 1
+    assert second["negative_cache_hit"] is True
+    assert second["provider_failure_class"] == "ohlcv_not_available"
+    assert len(client.fetch_calls) == 1
+
+
+def test_gecko_resolver_429_sets_cooldown_and_next_call_skips_http():
+    client = GeckoTerminalClient(
+        resolver_result={
+            "pool_address": None,
+            "resolver_source": "geckoterminal",
+            "resolver_confidence": "none",
+            "pool_candidates_seen": 0,
+            "pool_resolution_status": "pool_resolution_failed",
+            "warning": "provider_rate_limited",
+            "http_status": 429,
+        },
+        gecko_rate_limit_cooldown_sec=120,
+    )
+
+    first = client.fetch_price_path(token_address="tok-a", start_ts=1000, end_ts=1060, interval_sec=60, limit=2)
+    second = client.fetch_price_path(token_address="tok-b", start_ts=1000, end_ts=1060, interval_sec=60, limit=2)
+
+    assert first["provider_failure_class"] == "rate_limited_resolver"
+    assert first["provider_failure_retryable"] is True
+    assert second["cooldown_applied"] is True
+    assert second["provider_failure_class"] in {"rate_limited_resolver", "provider_rate_limited_recently"}
+    assert client.resolve_calls == [("tok-a", "solana")]
