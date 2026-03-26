@@ -920,6 +920,68 @@ class PriceHistoryClient:
         }
         return densified, metadata
 
+    def _build_gecko_path_debug_fields(
+        self,
+        *,
+        status: str,
+        observations: list[dict[str, Any]],
+        truncated: bool,
+        terminated_on_rate_limit: bool,
+        rate_limit_stage: str,
+        resolver_endpoint: str | None,
+        ohlcv_endpoint: str | None,
+        pool_resolution_http_status: int | None,
+        ohlcv_http_status: int | None,
+    ) -> dict[str, Any]:
+        point_count = len(observations)
+        replay_usable_price_path = point_count > 0
+        partial_but_usable_row = status == "partial" and replay_usable_price_path
+
+        if status == "complete" and replay_usable_price_path:
+            replay_data_hint = "historical"
+        elif replay_usable_price_path:
+            replay_data_hint = "historical_partial"
+        else:
+            replay_data_hint = "missing_price_path"
+
+        if rate_limit_stage == "resolver":
+            rate_limit_endpoint = resolver_endpoint
+            rate_limit_http_status = pool_resolution_http_status
+            collection_termination_reason = (
+                "rate_limited_resolver" if terminated_on_rate_limit else "resolver_unavailable"
+            )
+        elif rate_limit_stage == "ohlcv":
+            rate_limit_endpoint = ohlcv_endpoint
+            rate_limit_http_status = ohlcv_http_status
+            collection_termination_reason = "rate_limited_ohlcv"
+        elif status == "complete":
+            rate_limit_endpoint = None
+            rate_limit_http_status = None
+            collection_termination_reason = "complete_window"
+        elif truncated:
+            rate_limit_endpoint = None
+            rate_limit_http_status = None
+            collection_termination_reason = "truncated_window"
+        elif status == "partial":
+            rate_limit_endpoint = None
+            rate_limit_http_status = None
+            collection_termination_reason = "partial_window"
+        else:
+            rate_limit_endpoint = None
+            rate_limit_http_status = None
+            collection_termination_reason = "missing_window"
+
+        return {
+            "partial_but_usable_row": partial_but_usable_row,
+            "replay_usable_price_path": replay_usable_price_path,
+            "replay_data_hint": replay_data_hint,
+            "resolver_endpoint": resolver_endpoint,
+            "ohlcv_endpoint": ohlcv_endpoint,
+            "rate_limit_endpoint": rate_limit_endpoint,
+            "rate_limit_http_status": rate_limit_http_status,
+            "collection_termination_reason": collection_termination_reason,
+        }
+
     def _fetch_geckoterminal_price_path(
         self,
         *,
@@ -993,6 +1055,30 @@ class PriceHistoryClient:
             pool_info.get("warning") == "provider_rate_limited" or int(pool_info.get("http_status") or 0) == 429
         )
         if not selected_pool_address:
+            debug_fields = self._build_gecko_path_debug_fields(
+                status="missing",
+                observations=[],
+                truncated=False,
+                terminated_on_rate_limit=resolver_rate_limited,
+                rate_limit_stage="resolver" if resolver_rate_limited else "unknown",
+                resolver_endpoint=pool_info.get("endpoint"),
+                ohlcv_endpoint=None,
+                pool_resolution_http_status=pool_info.get("http_status"),
+                ohlcv_http_status=None,
+            )
+            request_summary.update(
+                {
+                    "resolver_endpoint": pool_info.get("endpoint"),
+                    "ohlcv_endpoint": None,
+                    "rate_limit_stage": "resolver" if resolver_rate_limited else "unknown",
+                    "rate_limit_endpoint": debug_fields.get("rate_limit_endpoint"),
+                    "rate_limit_http_status": debug_fields.get("rate_limit_http_status"),
+                    "partial_but_usable_row": debug_fields.get("partial_but_usable_row"),
+                    "replay_usable_price_path": debug_fields.get("replay_usable_price_path"),
+                    "replay_data_hint": debug_fields.get("replay_data_hint"),
+                    "collection_termination_reason": debug_fields.get("collection_termination_reason"),
+                }
+            )
             return {
                 "token_address": token_address,
                 "pair_address": pair_address,
@@ -1035,9 +1121,12 @@ class PriceHistoryClient:
                 "rate_limit_stage": "resolver" if resolver_rate_limited else "unknown",
                 "ohlcv_pages_attempted": 0,
                 "ohlcv_pages_succeeded": 0,
+                **debug_fields,
             }
         ohlcv_endpoint = self._format_endpoint(self.pair_endpoint, network=network, pool_address=selected_pool_address, timeframe="minute")
         request_summary["endpoint"] = ohlcv_endpoint
+        request_summary["resolver_endpoint"] = pool_info.get("endpoint")
+        request_summary["ohlcv_endpoint"] = ohlcv_endpoint
         raw_rows: list[list[Any]] = []
         before_ts = end_ts
         warning = None
@@ -1098,6 +1187,28 @@ class PriceHistoryClient:
         elif terminated_on_rate_limit or truncated:
             warning = warning or "price_path_incomplete"
         status = "missing" if missing else ("partial" if (terminated_on_rate_limit or truncated) else "complete")
+        debug_fields = self._build_gecko_path_debug_fields(
+            status=status,
+            observations=observations,
+            truncated=truncated,
+            terminated_on_rate_limit=terminated_on_rate_limit,
+            rate_limit_stage=rate_limit_stage,
+            resolver_endpoint=pool_info.get("endpoint"),
+            ohlcv_endpoint=ohlcv_endpoint,
+            pool_resolution_http_status=pool_resolution_http_status,
+            ohlcv_http_status=ohlcv_http_status,
+        )
+        request_summary.update(
+            {
+                "rate_limit_stage": rate_limit_stage,
+                "rate_limit_endpoint": debug_fields.get("rate_limit_endpoint"),
+                "rate_limit_http_status": debug_fields.get("rate_limit_http_status"),
+                "partial_but_usable_row": debug_fields.get("partial_but_usable_row"),
+                "replay_usable_price_path": debug_fields.get("replay_usable_price_path"),
+                "replay_data_hint": debug_fields.get("replay_data_hint"),
+                "collection_termination_reason": debug_fields.get("collection_termination_reason"),
+            }
+        )
         return {
             "token_address": token_address,
             "pair_address": pair_address,
@@ -1140,6 +1251,7 @@ class PriceHistoryClient:
             "rate_limit_stage": rate_limit_stage,
             "ohlcv_pages_attempted": ohlcv_pages_attempted,
             "ohlcv_pages_succeeded": ohlcv_pages_succeeded,
+            **debug_fields,
         }
 
     def fetch_price_path(
