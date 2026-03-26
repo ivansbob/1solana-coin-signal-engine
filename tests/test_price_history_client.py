@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 from collectors.price_history_client import PriceHistoryClient, resolve_price_history_provider, validate_price_history_provider_config
+from collectors.price_history_router import route_price_history
 
 
 class PayloadClient(PriceHistoryClient):
@@ -595,3 +596,131 @@ def test_transport_decision_timeout_maps_to_retry_later():
     assert result["provider_failure_class"] == "provider_timeout"
     assert result["provider_failure_retryable"] is True
     assert result["transport_action"] == "retry_later"
+
+
+def test_router_prefers_seeded_pair_before_token_lookup():
+    calls = []
+
+    def fetch_route(attempt):
+        calls.append((attempt["provider"], attempt["kind"], attempt.get("pair_address")))
+        return {"price_path_status": "complete", "missing": False}
+
+    result = route_price_history(
+        token_context={"token_address": "tok", "pair_address": "pair-1"},
+        provider_order=["geckoterminal_pool_ohlcv"],
+        primary_provider="birdeye_ohlcv_v3",
+        prior_failure=None,
+        max_routes_per_token=4,
+        accept_partial_usable=True,
+        cross_provider_fallback_on_retryable=True,
+        fetch_route=fetch_route,
+    )
+
+    assert calls[0] == ("birdeye_ohlcv_v3", "pair", "pair-1")
+    assert result["selected_route_kind"] == "pair"
+
+
+def test_router_falls_back_after_non_retryable_ohlcv_not_available():
+    calls = []
+
+    def fetch_route(attempt):
+        calls.append((attempt["provider"], attempt["kind"]))
+        if len(calls) == 1:
+            return {
+                "price_path_status": "missing",
+                "missing": True,
+                "provider_failure_class": "ohlcv_not_available",
+                "provider_failure_retryable": False,
+            }
+        return {"price_path_status": "complete", "missing": False}
+
+    result = route_price_history(
+        token_context={"token_address": "tok", "pair_address": "pair-1"},
+        provider_order=[],
+        primary_provider="birdeye_ohlcv_v3",
+        prior_failure=None,
+        max_routes_per_token=4,
+        accept_partial_usable=True,
+        cross_provider_fallback_on_retryable=True,
+        fetch_route=fetch_route,
+    )
+
+    assert calls[:2] == [("birdeye_ohlcv_v3", "pair"), ("birdeye_ohlcv_v3", "token")]
+    assert result["selected_route_kind"] == "token"
+
+
+def test_router_can_cross_provider_after_retryable_failure():
+    calls = []
+
+    def fetch_route(attempt):
+        calls.append((attempt["provider"], attempt["kind"]))
+        if attempt["provider"] == "birdeye_ohlcv_v3":
+            return {
+                "price_path_status": "missing",
+                "missing": True,
+                "provider_failure_class": "rate_limited_ohlcv",
+                "provider_failure_retryable": True,
+                "cooldown_applied": True,
+            }
+        return {"price_path_status": "complete", "missing": False}
+
+    result = route_price_history(
+        token_context={"token_address": "tok", "pair_address": "pair-1"},
+        provider_order=["geckoterminal_pool_ohlcv"],
+        primary_provider="birdeye_ohlcv_v3",
+        prior_failure=None,
+        max_routes_per_token=4,
+        accept_partial_usable=True,
+        cross_provider_fallback_on_retryable=True,
+        fetch_route=fetch_route,
+    )
+
+    assert ("geckoterminal_pool_ohlcv", "pair") in calls
+    assert result["selected_route_provider"] == "geckoterminal_pool_ohlcv"
+
+
+def test_router_accepts_partial_but_usable_as_terminal_success():
+    calls = []
+
+    def fetch_route(attempt):
+        calls.append(attempt["kind"])
+        return {"price_path_status": "partial", "partial_but_usable_row": True, "missing": False}
+
+    result = route_price_history(
+        token_context={"token_address": "tok", "pair_address": "pair-1"},
+        provider_order=[],
+        primary_provider="birdeye_ohlcv_v3",
+        prior_failure=None,
+        max_routes_per_token=4,
+        accept_partial_usable=True,
+        cross_provider_fallback_on_retryable=True,
+        fetch_route=fetch_route,
+    )
+
+    assert result["price_history_router_status"] == "ok"
+    assert result["selected_route_kind"] == "pair"
+    assert calls == ["pair"]
+
+
+def test_router_preserves_missing_when_all_routes_fail():
+    def fetch_route(attempt):
+        return {
+            "price_path_status": "missing",
+            "missing": True,
+            "provider_failure_class": "provider_timeout",
+            "provider_failure_retryable": True,
+        }
+
+    result = route_price_history(
+        token_context={"token_address": "tok", "pair_address": "pair-1"},
+        provider_order=["geckoterminal_pool_ohlcv"],
+        primary_provider="birdeye_ohlcv_v3",
+        prior_failure=None,
+        max_routes_per_token=3,
+        accept_partial_usable=True,
+        cross_provider_fallback_on_retryable=True,
+        fetch_route=fetch_route,
+    )
+
+    assert result["price_path_status"] == "missing"
+    assert result["price_history_router_status"] == "exhausted"

@@ -157,6 +157,13 @@ def _base_config(**backfill_overrides):
         "price_path_try_pairless": True,
         "price_path_min_points": 2,
         "price_path_retry_attempts": 12,
+        "price_history_router": {
+            "enabled": True,
+            "provider_order": [],
+            "cross_provider_fallback_on_retryable": True,
+            "accept_partial_usable": True,
+            "max_routes_per_token": 1,
+        },
     }
     backfill.update(backfill_overrides)
     return {
@@ -1255,3 +1262,35 @@ def test_summary_artifact_written_with_counters(monkeypatch, tmp_path):
     text = summary_path.read_text(encoding="utf-8")
     assert '"tokens_seen": 1' in text
     assert '"rows_written": 1' in text
+
+
+def test_chain_backfill_writes_transport_summary(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(chain_backfill, "SolanaRpcClient", FakeRpcClient)
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FakePriceHistoryClient)
+    chain_backfill.build_chain_context(
+        [{"token_address": "tok-summary", "pair_address": "pair", "pair_created_at_ts": 1000}],
+        _base_config(price_path_retry_attempts=1),
+        dry_run=False,
+    )
+    summary = (tmp_path / "data/processed/chain_backfill.transport_summary.json").read_text(encoding="utf-8")
+    assert '"attempts_by_provider_route_kind"' in summary
+    assert '"selected_route_provider_counts"' in summary
+
+
+def test_chain_backfill_propagates_selected_route_metadata(monkeypatch):
+    class MetadataClient(FakePriceHistoryClient):
+        def fetch_price_path(self, **kwargs):
+            row = super().fetch_price_path(**kwargs)
+            row["source_provider"] = "birdeye_ohlcv_v3"
+            return row
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", MetadataClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok-meta", "pair_address": "pair", "pair_created_at_ts": 1000},
+        {},
+        _base_config(price_path_retry_attempts=1),
+    )[0]
+    assert result["selected_route_provider"] == "birdeye_ohlcv_v3"
+    assert result["selected_route_kind"] in {"pair", "pool", "token"}
+    assert isinstance(result["price_history_route_attempts"], list)
