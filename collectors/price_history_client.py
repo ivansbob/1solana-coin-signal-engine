@@ -534,6 +534,7 @@ class PriceHistoryClient:
         max_ohlcv_limit: int = 1000,
         gecko_min_request_interval_sec: float = 0.0,
         gecko_rate_limit_cooldown_sec: float = 15.0,
+        gecko_ohlcv_404_negative_ttl_sec: float = 1800.0,
         gecko_max_pages_per_token: int = 12,
     ) -> None:
         self.base_url = str(base_url or "").strip().rstrip("/")
@@ -557,8 +558,12 @@ class PriceHistoryClient:
         self.max_ohlcv_limit = min(max(int(max_ohlcv_limit or 1000), 1), 1000)
         self.gecko_min_request_interval_sec = max(float(gecko_min_request_interval_sec or 0.0), 0.0)
         self.gecko_rate_limit_cooldown_sec = max(float(gecko_rate_limit_cooldown_sec or 0.0), 0.0)
+        self.gecko_ohlcv_404_negative_ttl_sec = max(float(gecko_ohlcv_404_negative_ttl_sec or 0.0), 0.0)
         self.gecko_max_pages_per_token = max(int(gecko_max_pages_per_token or 1), 1)
         self._resolver_cache: dict[str, tuple[int, dict[str, Any]]] = {}
+        self._gecko_cooldown_until_monotonic: float = 0.0
+        self._gecko_last_rate_limit_class: str | None = None
+        self._gecko_negative_cache: dict[str, float] = {}
 
     def provider_bootstrap(self) -> dict[str, Any]:
         return {
@@ -602,6 +607,7 @@ class PriceHistoryClient:
                 "max_ohlcv_limit": self.max_ohlcv_limit,
                 "gecko_min_request_interval_sec": self.gecko_min_request_interval_sec,
                 "gecko_rate_limit_cooldown_sec": self.gecko_rate_limit_cooldown_sec,
+                "gecko_ohlcv_404_negative_ttl_sec": self.gecko_ohlcv_404_negative_ttl_sec,
                 "gecko_max_pages_per_token": self.gecko_max_pages_per_token,
             },
         }
@@ -622,6 +628,7 @@ class PriceHistoryClient:
         if isinstance(payload, dict) and (
             payload.get("warning") == "provider_rate_limited" or int(payload.get("http_status") or 0) == 429
         ):
+            self._set_gecko_cooldown()
             self.__class__._gecko_global_cooldown_until = max(
                 float(self.__class__._gecko_global_cooldown_until),
                 time.monotonic() + self.gecko_rate_limit_cooldown_sec,
@@ -716,6 +723,56 @@ class PriceHistoryClient:
 
     def _geckoterminal_network(self) -> str:
         return str(self.chain or "solana").strip() or "solana"
+
+    def _set_gecko_cooldown(self, *, failure_class: str | None = None) -> None:
+        if self.gecko_rate_limit_cooldown_sec <= 0:
+            return
+        self._gecko_cooldown_until_monotonic = max(
+            float(self._gecko_cooldown_until_monotonic),
+            time.monotonic() + self.gecko_rate_limit_cooldown_sec,
+        )
+        if failure_class:
+            self._gecko_last_rate_limit_class = failure_class
+
+    def _classify_provider_failure(self, *, stage: str, http_status: int | None, warning: str | None) -> tuple[str | None, bool]:
+        status = int(http_status or 0)
+        normalized_warning = str(warning or "").strip().lower()
+        if status == 429 or normalized_warning == "provider_rate_limited":
+            if stage == "resolver":
+                return "rate_limited_resolver", True
+            if stage == "ohlcv":
+                return "rate_limited_ohlcv", True
+            return "provider_http_error", True
+        if status == 404 and stage == "ohlcv":
+            return "ohlcv_not_available", False
+        if status == 404:
+            return "provider_http_error", False
+        if status >= 500:
+            return "provider_http_error", True
+        if status >= 400:
+            return "provider_http_error", True
+        if normalized_warning in {"pool_resolution_failed", "no_pool_ohlcv_rows"}:
+            return None, True
+        return None, True
+
+    def _gecko_negative_cache_key(self, *, network: str, pool_address: str, interval_sec: int) -> str:
+        return f"{network}:{pool_address}:{int(interval_sec)}"
+
+    def _gecko_negative_cache_hit(self, *, network: str, pool_address: str, interval_sec: int) -> bool:
+        key = self._gecko_negative_cache_key(network=network, pool_address=pool_address, interval_sec=interval_sec)
+        expires_at = float(self._gecko_negative_cache.get(key) or 0.0)
+        now = time.monotonic()
+        if expires_at <= now:
+            if key in self._gecko_negative_cache:
+                self._gecko_negative_cache.pop(key, None)
+            return False
+        return True
+
+    def _remember_gecko_ohlcv_not_available(self, *, network: str, pool_address: str, interval_sec: int) -> None:
+        if self.gecko_ohlcv_404_negative_ttl_sec <= 0:
+            return
+        key = self._gecko_negative_cache_key(network=network, pool_address=pool_address, interval_sec=interval_sec)
+        self._gecko_negative_cache[key] = time.monotonic() + self.gecko_ohlcv_404_negative_ttl_sec
 
     def _with_provider_rate_limit_retry(
         self,
@@ -1005,6 +1062,7 @@ class PriceHistoryClient:
             "request_kind": "pool_ohlcv",
             "gecko_min_request_interval_sec": self.gecko_min_request_interval_sec,
             "gecko_rate_limit_cooldown_sec": self.gecko_rate_limit_cooldown_sec,
+            "gecko_ohlcv_404_negative_ttl_sec": self.gecko_ohlcv_404_negative_ttl_sec,
             "gecko_max_pages_per_token": self.gecko_max_pages_per_token,
         })
         network = self._geckoterminal_network()
@@ -1027,6 +1085,87 @@ class PriceHistoryClient:
             "ohlcv_pages_attempted": 0,
             "ohlcv_pages_succeeded": 0,
         }
+        provider_failure_class: str | None = None
+        provider_failure_retryable = True
+        provider_failure_stage: str | None = None
+        cooldown_applied = False
+        cooldown_reason: str | None = None
+        negative_cache_hit = False
+        if self._gecko_cooldown_until_monotonic > time.monotonic():
+            cooldown_applied = True
+            cooldown_reason = "provider_rate_limited_recently"
+            provider_failure_stage = "cooldown"
+            provider_failure_class = self._gecko_last_rate_limit_class or "provider_rate_limited_recently"
+            provider_failure_retryable = True
+            debug_fields = self._build_gecko_path_debug_fields(
+                status="missing",
+                observations=[],
+                truncated=False,
+                terminated_on_rate_limit=True,
+                rate_limit_stage="resolver",
+                resolver_endpoint=resolver_endpoint,
+                ohlcv_endpoint=None,
+                pool_resolution_http_status=429,
+                ohlcv_http_status=None,
+            )
+            return {
+                "token_address": token_address,
+                "pair_address": pair_address,
+                "pool_address": None,
+                "selected_pool_address": None,
+                "pool_resolver_source": pool_info.get("resolver_source"),
+                "pool_resolver_confidence": pool_info.get("resolver_confidence"),
+                "pool_candidates_seen": pool_info.get("pool_candidates_seen"),
+                "pool_resolution_status": "cooldown_skipped",
+                "source_provider": self.provider,
+                "price_history_provider": self.provider,
+                "price_history_provider_status": self.provider_status,
+                "provider_bootstrap_ok": self.provider_status == "configured",
+                "provider_config_source": self.provider_config_source,
+                "provider_request_summary": request_summary,
+                "requested_start_ts": start_ts,
+                "requested_end_ts": end_ts,
+                "interval_sec": interval_sec,
+                "request_params": {
+                    "token_address": token_address,
+                    "pair_address": pair_address or None,
+                    "pool_address": None,
+                    "start_ts": start_ts,
+                    "end_ts": end_ts,
+                    "interval_sec": interval_sec,
+                    "limit": limit,
+                },
+                "provider_row_count": 0,
+                "obs_len": 0,
+                "gap_fill_applied": False,
+                "gap_fill_count": 0,
+                "observed_row_count": 0,
+                "densified_row_count": 0,
+                "price_path_origin": "provider_observed",
+                "price_path": [],
+                "truncated": False,
+                "missing": True,
+                "price_path_status": "missing",
+                "warning": "provider_rate_limited_recently",
+                "endpoint": None,
+                "http_status": 429,
+                "pool_resolution_http_status": None,
+                "ohlcv_http_status": None,
+                "provider_error_message": None,
+                "provider_error_body": None,
+                "provider_error_payload": None,
+                "terminated_on_rate_limit": True,
+                "rate_limit_stage": "resolver",
+                "ohlcv_pages_attempted": 0,
+                "ohlcv_pages_succeeded": 0,
+                "provider_failure_class": provider_failure_class,
+                "provider_failure_retryable": provider_failure_retryable,
+                "provider_failure_stage": provider_failure_stage,
+                "cooldown_applied": cooldown_applied,
+                "cooldown_reason": cooldown_reason,
+                "negative_cache_hit": negative_cache_hit,
+                **debug_fields,
+            }
         if not pair_address:
             pool_info = self._resolve_geckoterminal_pool(token_address, network=network)
         selected_pool_address = pool_info.get("pool_address")
@@ -1055,6 +1194,14 @@ class PriceHistoryClient:
             pool_info.get("warning") == "provider_rate_limited" or int(pool_info.get("http_status") or 0) == 429
         )
         if not selected_pool_address:
+            provider_failure_class, provider_failure_retryable = self._classify_provider_failure(
+                stage="resolver",
+                http_status=pool_info.get("http_status"),
+                warning=pool_info.get("warning"),
+            )
+            provider_failure_stage = "resolver" if provider_failure_class else None
+            if provider_failure_class == "rate_limited_resolver":
+                self._set_gecko_cooldown(failure_class=provider_failure_class)
             debug_fields = self._build_gecko_path_debug_fields(
                 status="missing",
                 observations=[],
@@ -1121,6 +1268,12 @@ class PriceHistoryClient:
                 "rate_limit_stage": "resolver" if resolver_rate_limited else "unknown",
                 "ohlcv_pages_attempted": 0,
                 "ohlcv_pages_succeeded": 0,
+                "provider_failure_class": provider_failure_class,
+                "provider_failure_retryable": provider_failure_retryable,
+                "provider_failure_stage": provider_failure_stage,
+                "cooldown_applied": cooldown_applied,
+                "cooldown_reason": cooldown_reason,
+                "negative_cache_hit": negative_cache_hit,
                 **debug_fields,
             }
         ohlcv_endpoint = self._format_endpoint(self.pair_endpoint, network=network, pool_address=selected_pool_address, timeframe="minute")
@@ -1142,6 +1295,73 @@ class PriceHistoryClient:
         ohlcv_pages_succeeded = 0
         seen_oldest: set[int] = set()
         max_page_limit = min(max(limit, 1), self.max_ohlcv_limit)
+        if self._gecko_negative_cache_hit(network=network, pool_address=selected_pool_address, interval_sec=interval_sec):
+            negative_cache_hit = True
+            provider_failure_class = "ohlcv_not_available"
+            provider_failure_retryable = False
+            provider_failure_stage = "ohlcv"
+            warning = "no_pool_ohlcv_rows"
+            debug_fields = self._build_gecko_path_debug_fields(
+                status="missing",
+                observations=[],
+                truncated=False,
+                terminated_on_rate_limit=False,
+                rate_limit_stage="unknown",
+                resolver_endpoint=pool_info.get("endpoint"),
+                ohlcv_endpoint=ohlcv_endpoint,
+                pool_resolution_http_status=pool_resolution_http_status,
+                ohlcv_http_status=404,
+            )
+            return {
+                "token_address": token_address,
+                "pair_address": pair_address,
+                "pool_address": selected_pool_address,
+                "selected_pool_address": selected_pool_address,
+                "pool_resolver_source": pool_info.get("resolver_source"),
+                "pool_resolver_confidence": pool_info.get("resolver_confidence"),
+                "pool_candidates_seen": pool_info.get("pool_candidates_seen"),
+                "pool_resolution_status": pool_info.get("pool_resolution_status"),
+                "source_provider": self.provider,
+                "price_history_provider": self.provider,
+                "price_history_provider_status": self.provider_status,
+                "provider_bootstrap_ok": self.provider_status == "configured",
+                "provider_config_source": self.provider_config_source,
+                "provider_request_summary": request_summary,
+                "requested_start_ts": start_ts,
+                "requested_end_ts": end_ts,
+                "interval_sec": interval_sec,
+                "request_params": request_params,
+                "provider_row_count": 0,
+                "obs_len": 0,
+                "gap_fill_applied": False,
+                "gap_fill_count": 0,
+                "observed_row_count": 0,
+                "densified_row_count": 0,
+                "price_path_origin": "provider_observed",
+                "price_path": [],
+                "truncated": False,
+                "missing": True,
+                "price_path_status": "missing",
+                "warning": warning,
+                "endpoint": ohlcv_endpoint,
+                "http_status": 404,
+                "pool_resolution_http_status": pool_resolution_http_status,
+                "ohlcv_http_status": 404,
+                "provider_error_message": None,
+                "provider_error_body": None,
+                "provider_error_payload": None,
+                "terminated_on_rate_limit": False,
+                "rate_limit_stage": "unknown",
+                "ohlcv_pages_attempted": 0,
+                "ohlcv_pages_succeeded": 0,
+                "provider_failure_class": provider_failure_class,
+                "provider_failure_retryable": provider_failure_retryable,
+                "provider_failure_stage": provider_failure_stage,
+                "cooldown_applied": cooldown_applied,
+                "cooldown_reason": cooldown_reason,
+                "negative_cache_hit": negative_cache_hit,
+                **debug_fields,
+            }
         while ohlcv_pages_attempted < self.gecko_max_pages_per_token:
             ohlcv_pages_attempted += 1
             payload = self._fetch_geckoterminal_pool_ohlcv(
@@ -1164,6 +1384,20 @@ class PriceHistoryClient:
                 if warning == "provider_rate_limited" or int(ohlcv_http_status or 0) == 429:
                     terminated_on_rate_limit = True
                     rate_limit_stage = "ohlcv"
+                    provider_failure_class = "rate_limited_ohlcv"
+                    provider_failure_retryable = True
+                    provider_failure_stage = "ohlcv"
+                    self._set_gecko_cooldown(failure_class=provider_failure_class)
+                    break
+                if int(ohlcv_http_status or 0) == 404:
+                    provider_failure_class = "ohlcv_not_available"
+                    provider_failure_retryable = False
+                    provider_failure_stage = "ohlcv"
+                    self._remember_gecko_ohlcv_not_available(
+                        network=network,
+                        pool_address=selected_pool_address,
+                        interval_sec=interval_sec,
+                    )
                     break
             if batch:
                 ohlcv_pages_succeeded += 1
@@ -1209,6 +1443,13 @@ class PriceHistoryClient:
                 "collection_termination_reason": debug_fields.get("collection_termination_reason"),
             }
         )
+        if provider_failure_class is None:
+            provider_failure_class, provider_failure_retryable = self._classify_provider_failure(
+                stage="ohlcv",
+                http_status=ohlcv_http_status,
+                warning=warning,
+            )
+            provider_failure_stage = "ohlcv" if provider_failure_class else None
         return {
             "token_address": token_address,
             "pair_address": pair_address,
@@ -1251,6 +1492,12 @@ class PriceHistoryClient:
             "rate_limit_stage": rate_limit_stage,
             "ohlcv_pages_attempted": ohlcv_pages_attempted,
             "ohlcv_pages_succeeded": ohlcv_pages_succeeded,
+            "provider_failure_class": provider_failure_class,
+            "provider_failure_retryable": provider_failure_retryable,
+            "provider_failure_stage": provider_failure_stage,
+            "cooldown_applied": cooldown_applied,
+            "cooldown_reason": cooldown_reason,
+            "negative_cache_hit": negative_cache_hit,
             **debug_fields,
         }
 

@@ -256,6 +256,81 @@ def test_collect_price_paths_can_retry_without_pair_address(monkeypatch):
     assert len(result["price_path"]) >= 2
 
 
+def test_collect_price_paths_non_retryable_provider_failure_stops_attempts(monkeypatch):
+    class NonRetryableClient:
+        def __init__(self, *args, **kwargs):
+            self.calls = 0
+
+        def fetch_price_path(self, **kwargs):
+            self.calls += 1
+            return {
+                "token_address": kwargs["token_address"],
+                "pair_address": kwargs.get("pair_address"),
+                "source_provider": "fake",
+                "requested_start_ts": kwargs.get("start_ts"),
+                "requested_end_ts": kwargs.get("end_ts"),
+                "interval_sec": kwargs.get("interval_sec"),
+                "price_path": [],
+                "truncated": False,
+                "missing": True,
+                "price_path_status": "missing",
+                "warning": "no_pool_ohlcv_rows",
+                "provider_failure_class": "ohlcv_not_available",
+                "provider_failure_retryable": False,
+                "cooldown_applied": False,
+                "cooldown_reason": None,
+                "negative_cache_hit": False,
+            }
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", NonRetryableClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "pair_created_at_ts": 1000},
+        {},
+        _base_config(),
+    )[0]
+
+    assert result["attempt_count"] == 1
+    assert len(result["attempts"]) == 1
+    assert result["attempts"][0]["provider_failure_retryable"] is False
+
+
+def test_collect_price_paths_cooldown_applied_stops_futile_retries(monkeypatch):
+    class CooldownClient:
+        def __init__(self, *args, **kwargs):
+            self.calls = 0
+
+        def fetch_price_path(self, **kwargs):
+            self.calls += 1
+            return {
+                "token_address": kwargs["token_address"],
+                "pair_address": kwargs.get("pair_address"),
+                "source_provider": "fake",
+                "requested_start_ts": kwargs.get("start_ts"),
+                "requested_end_ts": kwargs.get("end_ts"),
+                "interval_sec": kwargs.get("interval_sec"),
+                "price_path": [],
+                "truncated": False,
+                "missing": True,
+                "price_path_status": "missing",
+                "warning": "provider_rate_limited_recently",
+                "provider_failure_class": "rate_limited_ohlcv",
+                "provider_failure_retryable": True,
+                "cooldown_applied": True,
+                "cooldown_reason": "provider_rate_limited_recently",
+                "negative_cache_hit": False,
+            }
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", CooldownClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "pair_created_at_ts": 1000},
+        {},
+        _base_config(),
+    )[0]
+
+    assert result["attempt_count"] == 1
+    assert result["attempts"][0]["cooldown_applied"] is True
+
+
 def test_collect_price_paths_preserves_best_partial_result(monkeypatch):
     class PartialChooserClient(StagedPriceHistoryClient):
         def fetch_price_path(self, **kwargs):

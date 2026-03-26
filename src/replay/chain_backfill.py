@@ -655,6 +655,12 @@ def _attempt_summary(path: dict[str, Any], *, strategy: str, fallback_mode: str 
         "pool_resolution_status": path.get("pool_resolution_status"),
         "terminated_on_rate_limit": bool(path.get("terminated_on_rate_limit")),
         "rate_limit_stage": path.get("rate_limit_stage"),
+        "provider_failure_class": path.get("provider_failure_class"),
+        "provider_failure_retryable": path.get("provider_failure_retryable"),
+        "provider_failure_stage": path.get("provider_failure_stage"),
+        "cooldown_applied": bool(path.get("cooldown_applied")),
+        "cooldown_reason": path.get("cooldown_reason"),
+        "negative_cache_hit": bool(path.get("negative_cache_hit")),
         "pool_resolution_http_status": path.get("pool_resolution_http_status"),
         "ohlcv_http_status": path.get("ohlcv_http_status"),
         "ohlcv_pages_attempted": int(path.get("ohlcv_pages_attempted") or 0),
@@ -839,6 +845,9 @@ def _collect_price_paths(
 
     min_points = max(int(bcfg.get("price_path_min_points", 2) or 2), 1)
     retry_attempts = max(int(bcfg.get("price_path_retry_attempts", 3) or 3), 1)
+    stop_after_non_retryable_provider_failure = bool(
+        bcfg.get("price_path_stop_after_non_retryable_provider_failure", True)
+    )
     limit = max(int(bcfg.get("price_path_limit", 256) or 256), 1)
     client = PriceHistoryClient(
         base_url=provider_config.get("base_url"),
@@ -862,6 +871,7 @@ def _collect_price_paths(
         max_ohlcv_limit=int(provider_config.get("max_ohlcv_limit") or 1000),
         gecko_min_request_interval_sec=float(bcfg.get("gecko_min_request_interval_sec", 0.0) or 0.0),
         gecko_rate_limit_cooldown_sec=float(bcfg.get("gecko_rate_limit_cooldown_sec", 15.0) or 15.0),
+        gecko_ohlcv_404_negative_ttl_sec=float(bcfg.get("gecko_ohlcv_404_negative_ttl_sec", 1800.0) or 1800.0),
         gecko_max_pages_per_token=int(bcfg.get("gecko_max_pages_per_token", 12) or 12),
     )
 
@@ -918,6 +928,12 @@ def _collect_price_paths(
         attempt_summaries.append(summary)
         results.append(path)
         if bool(path.get("terminated_on_rate_limit")):
+            break
+        if stop_after_non_retryable_provider_failure and (
+            path.get("provider_failure_retryable") is False
+            or bool(path.get("negative_cache_hit"))
+            or bool(path.get("cooldown_applied"))
+        ):
             break
 
     best = _choose_best_price_path(results, min_points=min_points)
@@ -1106,8 +1122,12 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
                 "price_path_min_points": int(bcfg.get("price_path_min_points", 2) or 2),
                 "price_path_require_nonempty": bool(bcfg.get("price_path_require_nonempty", True)),
                 "price_path_retry_attempts": int(bcfg.get("price_path_retry_attempts", 3) or 3),
+                "price_path_stop_after_non_retryable_provider_failure": bool(
+                    bcfg.get("price_path_stop_after_non_retryable_provider_failure", True)
+                ),
                 "gecko_min_request_interval_sec": float(bcfg.get("gecko_min_request_interval_sec", 0.0) or 0.0),
                 "gecko_rate_limit_cooldown_sec": float(bcfg.get("gecko_rate_limit_cooldown_sec", 15.0) or 15.0),
+                "gecko_ohlcv_404_negative_ttl_sec": float(bcfg.get("gecko_ohlcv_404_negative_ttl_sec", 1800.0) or 1800.0),
                 "gecko_max_pages_per_token": int(bcfg.get("gecko_max_pages_per_token", 12) or 12),
                 "enrich_time_anchor": bool(bcfg.get("enrich_time_anchor", True)),
                 "time_anchor_field_priority": list(_time_anchor_field_priority(config)),
