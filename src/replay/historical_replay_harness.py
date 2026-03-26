@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -201,6 +202,28 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+
+def _to_epoch_seconds(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except (TypeError, ValueError, OverflowError):
+        pass
+    try:
+        return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
+
+
 def _safe_wallet_features(*sources: dict[str, Any]) -> dict[str, Any]:
     features = dict(_DEFAULT_WALLET_FEATURES)
     for source in sources:
@@ -398,9 +421,49 @@ def _collect_observations(token_payload: dict[str, Any]) -> list[dict[str, Any]]
         observations = price_path.get("price_path") or []
         if isinstance(observations, list):
             rows.extend(obs for obs in observations if isinstance(obs, dict))
-    rows.sort(key=lambda row: float(row.get("offset_sec", row.get("elapsed_sec", row.get("t", 0))) or 0.0))
+    rows.sort(
+        key=lambda row: (
+            _to_epoch_seconds(row.get("timestamp") or row.get("ts") or row.get("time")) or 0,
+            float(row.get("offset_sec", row.get("elapsed_sec", row.get("t", 0))) or 0.0),
+        )
+    )
     return rows
 
+
+def _resolve_entry_price_from_historical_observation(entry: dict[str, Any], token_payload: dict[str, Any]) -> dict[str, Any]:
+    if entry.get("entry_price") is not None:
+        return entry
+
+    entry_ts = _to_epoch_seconds(entry.get("entry_time"))
+    if entry_ts is None:
+        return entry
+
+    for observation in _collect_observations(token_payload):
+        observation_ts = _to_epoch_seconds(
+            observation.get("timestamp") or observation.get("ts") or observation.get("time")
+        )
+        if observation_ts is None or observation_ts < entry_ts:
+            continue
+
+        observation_price = _safe_float(
+            observation.get("price") if "price" in observation else observation.get("price_usd")
+        )
+        if observation_price is None:
+            continue
+
+        return {
+            **entry,
+            "entry_price": observation_price,
+            "entry_price_source": "historical_price_path",
+            "entry_price_timestamp": (
+                observation.get("timestamp")
+                or observation.get("ts")
+                or observation.get("time")
+                or observation_ts
+            ),
+        }
+
+    return entry
 
 def _augment_current_context(base: dict[str, Any], observation: dict[str, Any], entry_price: float | None) -> dict[str, Any]:
     current = dict(base)
@@ -978,6 +1041,7 @@ def replay_token_lifecycle(
         }
 
     entry = _extract_entry_context(base_context, token_payload)
+    entry = _resolve_entry_price_from_historical_observation(entry, token_payload)
     if entry.get("entry_price") is None:
         missing_evidence.append("entry_price")
     state.open_position(entry_time=entry["entry_time"], entry_price=entry.get("entry_price"))
@@ -1033,6 +1097,9 @@ def replay_token_lifecycle(
         "replay_input_origin": replay_input_origin,
         "replay_data_status": replay_data_status,
         "replay_resolution_status": replay_resolution_status,
+        "entry_price": entry.get("entry_price"),
+        "entry_price_source": entry.get("entry_price_source"),
+        "entry_price_timestamp": entry.get("entry_price_timestamp"),
         "synthetic_assist_flag": synthetic_assist_flag,
     }
     trade_observations = extract_price_observations(trade, *[path for path in token_payload.get("price_paths") or []])
@@ -1049,6 +1116,8 @@ def replay_token_lifecycle(
         "closed_at": exit_payload.get("exit_time"),
         "warnings": [*missing_evidence, *(exit_payload.get("exit_warnings") or [])],
         "entry_price": entry.get("entry_price"),
+        "entry_price_source": entry.get("entry_price_source"),
+        "entry_price_timestamp": entry.get("entry_price_timestamp"),
         "exit_price": exit_payload.get("exit_price"),
         "gross_pnl_pct": exit_payload.get("gross_pnl_pct"),
         "net_pnl_pct": exit_payload.get("net_pnl_pct"),
