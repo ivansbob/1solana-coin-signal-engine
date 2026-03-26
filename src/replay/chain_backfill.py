@@ -599,10 +599,20 @@ def _build_missing_price_path(
         "time_anchor_discarded_candidates": time_anchor_discarded_candidates or [],
         "time_anchor_preference_applied": bool(time_anchor_preference_applied),
         "selected_pool_address": selected_pool_address,
+        "selected_pool_candidate_rank": None,
+        "selected_pool_candidate_source": None,
+        "attempted_pool_candidates": [],
+        "attempted_pool_candidate_count": 0,
+        "provider_failure_class": "missing_price_path",
+        "provider_failure_retryable": False,
+        "provider_family_exhausted": True,
         "pool_resolver_source": pool_resolver_source,
         "pool_resolver_confidence": pool_resolver_confidence,
         "pool_candidates_seen": pool_candidates_seen,
         "pool_resolution_status": pool_resolution_status,
+        "selected_route_provider": price_history_provider,
+        "selected_route_kind": "token",
+        "selected_route_seed_source": "backfill_missing_row",
         "gap_fill_applied": bool(gap_fill_applied),
         "gap_fill_count": int(gap_fill_count or 0),
         "observed_row_count": int(observed_row_count or 0),
@@ -882,6 +892,7 @@ def _collect_price_paths(
             gecko_pool_candidate_limit=int(bcfg.get("gecko_pool_candidate_limit", 3) or 3),
             gecko_try_seeded_pair_first=bool(bcfg.get("gecko_try_seeded_pair_first", True)),
             gecko_try_alternate_pools_on_ohlcv_404=bool(bcfg.get("gecko_try_alternate_pools_on_ohlcv_404", True)),
+            gecko_try_seeded_pair_on_resolver_429=bool(bcfg.get("gecko_try_seeded_pair_on_resolver_429", True)),
             request_timeout_sec=float(bcfg.get("gecko_request_timeout_sec", bcfg.get("request_timeout_sec", 20)) or 20),
             transport_memory=transport_memory,
         )
@@ -1001,7 +1012,10 @@ def _collect_price_paths(
         attempt_summaries.append(summary)
         results.append(path)
         transport_action = str(path.get("transport_action") or "")
-        if transport_action in {"skip_non_retryable", "skip_due_to_cooldown"}:
+        provider_family_exhausted = bool(path.get("provider_family_exhausted"))
+        if transport_action == "skip_due_to_cooldown":
+            break
+        if transport_action == "skip_non_retryable" and path.get("provider_family_exhausted") is not False:
             break
         if transport_action == "retry_later" and bool(bcfg.get("gecko_skip_retryable_after_global_cooldown", True)):
             if bool(path.get("cooldown_applied")):
@@ -1206,7 +1220,7 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
         "completed_input": False,
         "attempts_by_provider_route_kind": {},
         "selected_route_provider_counts": {},
-        "failure_class_counts": {},
+        "provider_failure_class_counts": {},
         "status_counts": {"complete": 0, "partial_usable": 0, "missing": 0},
         "fallback_used_count": 0,
         "provider_family_exhausted_count": 0,
@@ -1253,6 +1267,7 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
                 "gecko_pool_candidate_limit": int(bcfg.get("gecko_pool_candidate_limit", 3) or 3),
                 "gecko_try_seeded_pair_first": bool(bcfg.get("gecko_try_seeded_pair_first", True)),
                 "gecko_try_alternate_pools_on_ohlcv_404": bool(bcfg.get("gecko_try_alternate_pools_on_ohlcv_404", True)),
+                "gecko_try_seeded_pair_on_resolver_429": bool(bcfg.get("gecko_try_seeded_pair_on_resolver_429", True)),
                 "gecko_stop_after_provider_family_exhausted": bool(bcfg.get("gecko_stop_after_provider_family_exhausted", True)),
                 "enrich_time_anchor": bool(bcfg.get("enrich_time_anchor", True)),
                 "time_anchor_field_priority": list(_time_anchor_field_priority(config)),
@@ -1320,10 +1335,10 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
         if status_key in summary["status_counts"]:
             summary["status_counts"][status_key] += 1
         selected_route_provider = str(path.get("selected_route_provider") or "")
-        if selected_route_provider:
-            summary["selected_route_provider_counts"][selected_route_provider] = (
-                int(summary["selected_route_provider_counts"].get(selected_route_provider) or 0) + 1
-            )
+        selected_route_provider_key = selected_route_provider or "unknown"
+        summary["selected_route_provider_counts"][selected_route_provider_key] = (
+            int(summary["selected_route_provider_counts"].get(selected_route_provider_key) or 0) + 1
+        )
         if bool(path.get("price_history_fallback_used")):
             summary["fallback_used_count"] += 1
         if bool(path.get("provider_family_exhausted")):
@@ -1339,7 +1354,7 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
             )
         failure_class = str(path.get("provider_failure_class") or "")
         if failure_class:
-            summary["failure_class_counts"][failure_class] = int(summary["failure_class_counts"].get(failure_class) or 0) + 1
+            summary["provider_failure_class_counts"][failure_class] = int(summary["provider_failure_class_counts"].get(failure_class) or 0) + 1
         for route_attempt in path.get("price_history_route_attempts") or []:
             provider_key = str(route_attempt.get("provider") or "unknown")
             route_kind = str(route_attempt.get("route_kind") or "unknown")

@@ -539,6 +539,7 @@ class PriceHistoryClient:
         gecko_pool_candidate_limit: int = 3,
         gecko_try_seeded_pair_first: bool = True,
         gecko_try_alternate_pools_on_ohlcv_404: bool = True,
+        gecko_try_seeded_pair_on_resolver_429: bool = True,
         request_timeout_sec: float = 20.0,
         transport_memory: dict[str, Any] | None = None,
     ) -> None:
@@ -568,6 +569,7 @@ class PriceHistoryClient:
         self.gecko_pool_candidate_limit = max(int(gecko_pool_candidate_limit or 1), 1)
         self.gecko_try_seeded_pair_first = bool(gecko_try_seeded_pair_first)
         self.gecko_try_alternate_pools_on_ohlcv_404 = bool(gecko_try_alternate_pools_on_ohlcv_404)
+        self.gecko_try_seeded_pair_on_resolver_429 = bool(gecko_try_seeded_pair_on_resolver_429)
         self.request_timeout_sec = max(float(request_timeout_sec or 20.0), 1.0)
         memory = transport_memory if isinstance(transport_memory, dict) else {}
         self.transport_memory = memory
@@ -625,6 +627,7 @@ class PriceHistoryClient:
                 "gecko_pool_candidate_limit": self.gecko_pool_candidate_limit,
                 "gecko_try_seeded_pair_first": self.gecko_try_seeded_pair_first,
                 "gecko_try_alternate_pools_on_ohlcv_404": self.gecko_try_alternate_pools_on_ohlcv_404,
+                "gecko_try_seeded_pair_on_resolver_429": self.gecko_try_seeded_pair_on_resolver_429,
                 "request_timeout_sec": self.request_timeout_sec,
             },
         }
@@ -787,6 +790,15 @@ class PriceHistoryClient:
         row.setdefault("selected_route_provider", None)
         row.setdefault("selected_route_kind", None)
         row.setdefault("selected_route_seed_source", None)
+        row.setdefault("selected_pool_address", row.get("pool_address"))
+        row.setdefault("selected_pool_candidate_rank", None)
+        row.setdefault("selected_pool_candidate_source", None)
+        row.setdefault("attempted_pool_candidates", [])
+        row["attempted_pool_candidate_count"] = int(len(row.get("attempted_pool_candidates") or []))
+        row.setdefault("provider_failure_class", None)
+        row.setdefault("provider_failure_retryable", True)
+        row.setdefault("provider_family_exhausted", False)
+        row.setdefault("pool_resolution_status", None)
         provider_failure_class = str(row.get("provider_failure_class") or "")
         if bool(row.get("cooldown_applied")):
             transport_action = "skip_due_to_cooldown"
@@ -928,9 +940,9 @@ class PriceHistoryClient:
         ]
         candidate_family: list[dict[str, Any]] = []
         if canonical_address:
-            candidate_family.append({"pool_address": canonical_address, "source": "canonical_resolved_pool"})
+            candidate_family.append({"pool_address": canonical_address, "source": "resolver_primary"})
         for address in alternate_addresses:
-            candidate_family.append({"pool_address": address, "source": "alternate_resolved_pool"})
+            candidate_family.append({"pool_address": address, "source": "resolver_alternate"})
         if self.gecko_pool_candidate_limit > 0:
             candidate_family = candidate_family[: self.gecko_pool_candidate_limit]
         result = {
@@ -1261,19 +1273,24 @@ class PriceHistoryClient:
         canonical_from_pool_info = str(
             pool_info.get("selected_pool_address") or pool_info.get("pool_address") or ""
         ).strip()
-        if pair_address and self.gecko_try_seeded_pair_first:
-            candidate_family.append({"pool_address": pair_address, "source": "seeded_pair_hint"})
+        resolver_http_status = int(pool_info.get("http_status") or 0)
+        seeded_pair_should_prepend = bool(pair_address) and (
+            self.gecko_try_seeded_pair_first
+            or (resolver_http_status == 429 and self.gecko_try_seeded_pair_on_resolver_429)
+        )
+        if pair_address and seeded_pair_should_prepend:
+            candidate_family.append({"pool_address": pair_address, "source": "seeded_pair"})
         if canonical_from_pool_info:
-            candidate_family.append({"pool_address": canonical_from_pool_info, "source": "canonical_resolved_pool"})
+            candidate_family.append({"pool_address": canonical_from_pool_info, "source": "resolver_primary"})
         for candidate in resolver_candidates:
             address = str(candidate.get("pool_address") or "").strip()
             if address:
                 candidate_family.append({
                     "pool_address": address,
-                    "source": str(candidate.get("source") or "resolved_pool_candidate"),
+                    "source": "resolver_alternate",
                 })
-        if pair_address and not self.gecko_try_seeded_pair_first:
-            candidate_family.append({"pool_address": pair_address, "source": "seeded_pair_hint"})
+        if pair_address and not seeded_pair_should_prepend:
+            candidate_family.append({"pool_address": pair_address, "source": "seeded_pair"})
         deduped_candidates: list[dict[str, Any]] = []
         for candidate in candidate_family:
             address = str(candidate.get("pool_address") or "").strip()
@@ -1282,7 +1299,7 @@ class PriceHistoryClient:
             seen_candidates.add(address)
             deduped_candidates.append({
                 "pool_address": address,
-                "source": str(candidate.get("source") or "resolved_pool_candidate"),
+                "source": str(candidate.get("source") or "resolver_alternate"),
             })
         if self.gecko_pool_candidate_limit > 0:
             deduped_candidates = deduped_candidates[: self.gecko_pool_candidate_limit]
