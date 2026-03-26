@@ -872,6 +872,7 @@ def test_collect_price_paths_preserves_pool_resolution_diagnostics_on_missing_ro
     )[0]
 
     assert result["missing"] is True
+    assert result["pair_address"] == "resolved-pool"
     assert result["selected_pool_address"] == "resolved-pool"
     assert result["warning"] == "no_pool_ohlcv_rows"
 
