@@ -936,6 +936,7 @@ class PriceHistoryClient:
         point_count = len(observations)
         replay_usable_price_path = point_count > 0
         partial_but_usable_row = status == "partial" and replay_usable_price_path
+
         if status == "complete" and replay_usable_price_path:
             replay_data_hint = "historical"
         elif replay_usable_price_path:
@@ -946,7 +947,9 @@ class PriceHistoryClient:
         if rate_limit_stage == "resolver":
             rate_limit_endpoint = resolver_endpoint
             rate_limit_http_status = pool_resolution_http_status
-            collection_termination_reason = "rate_limited_resolver" if terminated_on_rate_limit else "resolver_unavailable"
+            collection_termination_reason = (
+                "rate_limited_resolver" if terminated_on_rate_limit else "resolver_unavailable"
+            )
         elif rate_limit_stage == "ohlcv":
             rate_limit_endpoint = ohlcv_endpoint
             rate_limit_http_status = ohlcv_http_status
