@@ -1093,3 +1093,165 @@ def test_chain_backfill_summary_counts_rate_limited_partials_and_missing():
     assert summary["rate_limited_missing_rows"] == 2
     assert summary["resolver_stage_rate_limits"] == 1
     assert summary["ohlcv_stage_rate_limits"] == 2
+
+
+class SampleFirstPriceHistoryClient:
+    attempts_by_token: dict[str, int] = {}
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def fetch_price_path(self, **kwargs):
+        token = kwargs["token_address"]
+        self.__class__.attempts_by_token[token] = self.__class__.attempts_by_token.get(token, 0) + 1
+        if token.endswith("missing"):
+            return {
+                "token_address": token,
+                "pair_address": kwargs.get("pair_address"),
+                "price_path": [],
+                "missing": True,
+                "price_path_status": "missing",
+                "warning": "no_ohlcv_rows",
+                "transport_action": "retry_later",
+                "provider_failure_retryable": True,
+            }
+        if token.endswith("partial"):
+            return {
+                "token_address": token,
+                "pair_address": kwargs.get("pair_address"),
+                "price_path": [{"timestamp": kwargs.get("start_ts"), "offset_sec": 0, "price": 1.0}],
+                "missing": False,
+                "truncated": True,
+                "price_path_status": "partial",
+                "partial_but_usable_row": True,
+                "transport_action": "accept",
+                "usable_for_sampling": True,
+            }
+        return {
+            "token_address": token,
+            "pair_address": kwargs.get("pair_address"),
+            "price_path": [{"timestamp": kwargs.get("start_ts"), "offset_sec": 0, "price": 1.0}],
+            "missing": False,
+            "truncated": False,
+            "price_path_status": "complete",
+            "transport_action": "accept",
+            "usable_for_sampling": True,
+        }
+
+
+def test_sample_first_stops_after_target_usable_rows(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(chain_backfill, "SolanaRpcClient", FakeRpcClient)
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", SampleFirstPriceHistoryClient)
+    SampleFirstPriceHistoryClient.attempts_by_token = {}
+    rows = chain_backfill.build_chain_context(
+        [
+            {"token_address": "tok-missing", "pair_address": "pair", "pair_created_at_ts": 1000},
+            {"token_address": "tok-partial", "pair_address": "pair", "pair_created_at_ts": 1000},
+            {"token_address": "tok-complete", "pair_address": "pair", "pair_created_at_ts": 1000},
+            {"token_address": "tok-never", "pair_address": "pair", "pair_created_at_ts": 1000},
+        ],
+        _base_config(
+            gecko_transport_strategy="sample_first",
+            gecko_target_usable_rows_per_run=2,
+            gecko_stop_after_target_usable_rows=True,
+            gecko_max_tokens_per_run=20,
+            gecko_max_consecutive_failures=8,
+            price_path_retry_attempts=1,
+        ),
+        dry_run=False,
+    )
+    assert len(rows) == 3
+    summary = (tmp_path / "data/processed/chain_backfill.transport_summary.json").read_text(encoding="utf-8")
+    assert '"stop_reason": "target_usable_rows_reached"' in summary
+    assert "tok-never" not in SampleFirstPriceHistoryClient.attempts_by_token
+
+
+def test_partial_usable_counts_toward_target(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(chain_backfill, "SolanaRpcClient", FakeRpcClient)
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", SampleFirstPriceHistoryClient)
+    rows = chain_backfill.build_chain_context(
+        [{"token_address": "tok-partial", "pair_address": "pair", "pair_created_at_ts": 1000}],
+        _base_config(gecko_target_usable_rows_per_run=1, gecko_stop_after_target_usable_rows=True, price_path_retry_attempts=1),
+        dry_run=False,
+    )
+    assert rows[0]["price_paths"][0]["partial_but_usable_row"] is True
+    summary_path = tmp_path / "data/processed/chain_backfill.transport_summary.json"
+    assert summary_path.exists()
+    assert '"usable_rows_collected": 1' in summary_path.read_text(encoding="utf-8")
+
+
+def test_non_retryable_failures_do_not_retry_within_run(monkeypatch):
+    class NonRetryableClient:
+        calls = 0
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fetch_price_path(self, **kwargs):
+            self.__class__.calls += 1
+            return {
+                "token_address": kwargs["token_address"],
+                "pair_address": kwargs.get("pair_address"),
+                "price_path": [],
+                "missing": True,
+                "price_path_status": "missing",
+                "provider_failure_class": "ohlcv_not_available",
+                "provider_failure_retryable": False,
+                "transport_action": "skip_non_retryable",
+            }
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", NonRetryableClient)
+    NonRetryableClient.calls = 0
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "pair_created_at_ts": 1000},
+        {},
+        _base_config(price_path_retry_attempts=5),
+    )[0]
+    assert NonRetryableClient.calls == 1
+    assert result["provider_failure_class"] == "ohlcv_not_available"
+
+
+def test_consecutive_failures_stop_run(monkeypatch, tmp_path):
+    class AlwaysFailClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fetch_price_path(self, **kwargs):
+            return {
+                "token_address": kwargs["token_address"],
+                "pair_address": kwargs.get("pair_address"),
+                "price_path": [],
+                "missing": True,
+                "price_path_status": "missing",
+                "transport_action": "retry_later",
+                "provider_failure_retryable": True,
+            }
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(chain_backfill, "SolanaRpcClient", FakeRpcClient)
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", AlwaysFailClient)
+    chain_backfill.build_chain_context(
+        [{"token_address": f"tok-{i}", "pair_address": "pair", "pair_created_at_ts": 1000} for i in range(10)],
+        _base_config(gecko_max_consecutive_failures=2, price_path_retry_attempts=1),
+        dry_run=False,
+    )
+    summary = (tmp_path / "data/processed/chain_backfill.transport_summary.json").read_text(encoding="utf-8")
+    assert '"stop_reason": "max_consecutive_failures_reached"' in summary
+
+
+def test_summary_artifact_written_with_counters(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(chain_backfill, "SolanaRpcClient", FakeRpcClient)
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FakePriceHistoryClient)
+    chain_backfill.build_chain_context(
+        [{"token_address": "tok", "pair_address": "pair", "pair_created_at_ts": 1000}],
+        _base_config(price_path_retry_attempts=1),
+        dry_run=False,
+    )
+    summary_path = tmp_path / "data/processed/chain_backfill.transport_summary.json"
+    assert summary_path.exists()
+    text = summary_path.read_text(encoding="utf-8")
+    assert '"tokens_seen": 1' in text
+    assert '"rows_written": 1' in text

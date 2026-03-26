@@ -752,6 +752,7 @@ def _collect_price_paths(
     signature_block_times: list[int] | None = None,
     rpc_client: SolanaRpcClient | None = None,
     limiter: RateLimiter | None = None,
+    transport_memory: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     bcfg = config.get("backfill", {})
     token = str(cand.get("token_address") or "")
@@ -873,6 +874,8 @@ def _collect_price_paths(
         gecko_rate_limit_cooldown_sec=float(bcfg.get("gecko_rate_limit_cooldown_sec", 15.0) or 15.0),
         gecko_ohlcv_404_negative_ttl_sec=float(bcfg.get("gecko_ohlcv_404_negative_ttl_sec", 1800.0) or 1800.0),
         gecko_max_pages_per_token=int(bcfg.get("gecko_max_pages_per_token", 12) or 12),
+        request_timeout_sec=float(bcfg.get("gecko_request_timeout_sec", bcfg.get("request_timeout_sec", 20)) or 20),
+        transport_memory=transport_memory,
     )
 
     attempts = _iter_price_path_attempts(token, pair_address, start_ts, config)
@@ -927,6 +930,12 @@ def _collect_price_paths(
         summary = _attempt_summary(path, strategy=attempt["strategy"], fallback_mode=attempt["strategy"] if attempt["strategy"] != "primary" else None)
         attempt_summaries.append(summary)
         results.append(path)
+        transport_action = str(path.get("transport_action") or "")
+        if transport_action in {"skip_non_retryable", "skip_due_to_cooldown"}:
+            break
+        if transport_action == "retry_later" and bool(bcfg.get("gecko_skip_retryable_after_global_cooldown", True)):
+            if bool(path.get("cooldown_applied")):
+                break
         if bool(path.get("terminated_on_rate_limit")):
             break
         if stop_after_non_retryable_provider_failure and (
@@ -1103,10 +1112,44 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
     client = SolanaRpcClient(rpc_url=rpc_url)
     limiter = RateLimiter(float(bcfg.get("max_rps", 5)))
     cache_dir = Path(".cache/replay")
+    transport_memory: dict[str, Any] = {}
+    summary = {
+        "tokens_seen": 0,
+        "rows_written": 0,
+        "usable_rows_collected": 0,
+        "usable_complete_rows": 0,
+        "usable_partial_rows": 0,
+        "usable_for_sampling_rows": 0,
+        "complete_rows": 0,
+        "partial_usable_rows": 0,
+        "missing_rows": 0,
+        "retryable_failures": 0,
+        "non_retryable_failures": 0,
+        "cooldown_skips": 0,
+        "negative_cache_skips": 0,
+        "global_cooldown_trigger_count": 0,
+        "provider_timeout_count": 0,
+        "consecutive_failures": 0,
+        "stop_reason": "completed_input",
+        "target_usable_rows_reached": False,
+        "max_tokens_reached": False,
+        "max_consecutive_failures_reached": False,
+        "completed_input": False,
+    }
+    strategy = str(bcfg.get("gecko_transport_strategy", "sample_first") or "sample_first").strip()
+    target_usable_rows = max(int(bcfg.get("gecko_target_usable_rows_per_run", 5) or 5), 1)
+    max_tokens_per_run = max(int(bcfg.get("gecko_max_tokens_per_run", len(candidates) or 1) or (len(candidates) or 1)), 1)
+    stop_after_target = bool(bcfg.get("gecko_stop_after_target_usable_rows", True))
+    max_consecutive_failures = max(int(bcfg.get("gecko_max_consecutive_failures", 8) or 8), 1)
 
     rows: list[dict[str, Any]] = []
     for cand in candidates:
+        if summary["tokens_seen"] >= max_tokens_per_run:
+            summary["stop_reason"] = "max_tokens_reached"
+            summary["max_tokens_reached"] = True
+            break
         token = str(cand.get("token_address", ""))
+        summary["tokens_seen"] += 1
         key = _cache_key(
             "backfill",
             {
@@ -1174,6 +1217,7 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
             signature_block_times=signature_block_times,
             rpc_client=client,
             limiter=limiter,
+            transport_memory=transport_memory,
         )
         row = {
             "token_address": token,
@@ -1187,4 +1231,51 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
         if bcfg.get("cache_enabled", True):
             _cache_write(cache_dir, key, row)
         rows.append(row)
+        summary["rows_written"] = len(rows)
+        path = (price_paths or [{}])[0]
+        status = str(path.get("price_path_status") or "missing")
+        usable = status == "complete" or bool(path.get("partial_but_usable_row")) or bool(path.get("usable_for_sampling"))
+        if status == "complete":
+            summary["complete_rows"] += 1
+        elif bool(path.get("partial_but_usable_row")):
+            summary["partial_usable_rows"] += 1
+        elif status == "missing":
+            summary["missing_rows"] += 1
+        if bool(path.get("usable_for_sampling")):
+            summary["usable_for_sampling_rows"] += 1
+        if usable:
+            summary["usable_rows_collected"] += 1
+            if status == "complete":
+                summary["usable_complete_rows"] += 1
+            elif bool(path.get("partial_but_usable_row")):
+                summary["usable_partial_rows"] += 1
+            summary["consecutive_failures"] = 0
+        else:
+            summary["consecutive_failures"] += 1
+        action = str(path.get("transport_action") or "")
+        if action == "retry_later":
+            summary["retryable_failures"] += 1
+        elif action == "skip_non_retryable":
+            summary["non_retryable_failures"] += 1
+        if action == "skip_due_to_cooldown":
+            summary["cooldown_skips"] += 1
+        if bool(path.get("negative_cache_hit")):
+            summary["negative_cache_skips"] += 1
+        if bool(path.get("cooldown_applied")):
+            summary["global_cooldown_trigger_count"] += 1
+        if str(path.get("provider_failure_class") or "") == "provider_timeout":
+            summary["provider_timeout_count"] += 1
+        if strategy == "sample_first" and stop_after_target and summary["usable_rows_collected"] >= target_usable_rows:
+            summary["stop_reason"] = "target_usable_rows_reached"
+            summary["target_usable_rows_reached"] = True
+            break
+        if summary["consecutive_failures"] >= max_consecutive_failures:
+            summary["stop_reason"] = "max_consecutive_failures_reached"
+            summary["max_consecutive_failures_reached"] = True
+            break
+    if summary["stop_reason"] == "completed_input":
+        summary["completed_input"] = True
+    summary_path = Path("data/processed/chain_backfill.transport_summary.json")
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     return rows

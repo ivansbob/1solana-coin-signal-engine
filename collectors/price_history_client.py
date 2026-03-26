@@ -536,6 +536,8 @@ class PriceHistoryClient:
         gecko_rate_limit_cooldown_sec: float = 15.0,
         gecko_ohlcv_404_negative_ttl_sec: float = 1800.0,
         gecko_max_pages_per_token: int = 12,
+        request_timeout_sec: float = 20.0,
+        transport_memory: dict[str, Any] | None = None,
     ) -> None:
         self.base_url = str(base_url or "").strip().rstrip("/")
         self.api_key = str(api_key or "").strip()
@@ -560,6 +562,11 @@ class PriceHistoryClient:
         self.gecko_rate_limit_cooldown_sec = max(float(gecko_rate_limit_cooldown_sec or 0.0), 0.0)
         self.gecko_ohlcv_404_negative_ttl_sec = max(float(gecko_ohlcv_404_negative_ttl_sec or 0.0), 0.0)
         self.gecko_max_pages_per_token = max(int(gecko_max_pages_per_token or 1), 1)
+        self.request_timeout_sec = max(float(request_timeout_sec or 20.0), 1.0)
+        memory = transport_memory if isinstance(transport_memory, dict) else {}
+        self.transport_memory = memory
+        self._transport_provider_cooldowns = memory.setdefault("provider_cooldowns", {})
+        self._transport_non_retryable = memory.setdefault("non_retryable", {})
         self._resolver_cache: dict[str, tuple[int, dict[str, Any]]] = {}
         self._gecko_cooldown_until_monotonic: float = 0.0
         self._gecko_last_rate_limit_class: str | None = None
@@ -609,6 +616,7 @@ class PriceHistoryClient:
                 "gecko_rate_limit_cooldown_sec": self.gecko_rate_limit_cooldown_sec,
                 "gecko_ohlcv_404_negative_ttl_sec": self.gecko_ohlcv_404_negative_ttl_sec,
                 "gecko_max_pages_per_token": self.gecko_max_pages_per_token,
+                "request_timeout_sec": self.request_timeout_sec,
             },
         }
 
@@ -651,7 +659,7 @@ class PriceHistoryClient:
             req_headers.update(headers)
         req = Request(f"{self.base_url}/{endpoint}?{urlencode(query)}", headers=req_headers)
         try:
-            with urlopen(req, timeout=20) as response:
+            with urlopen(req, timeout=self.request_timeout_sec) as response:
                 raw_body = response.read().decode("utf-8", errors="replace")
                 payload = json.loads(raw_body)
                 if isinstance(payload, dict):
@@ -688,7 +696,7 @@ class PriceHistoryClient:
             return {
                 "rows": [],
                 "missing": True,
-                "warning": "provider_http_error",
+                "warning": "provider_timeout" if isinstance(exc, TimeoutError) else "provider_http_error",
                 "http_status": None,
                 "provider_error_message": str(exc),
                 "provider_error_body": None,
@@ -733,10 +741,16 @@ class PriceHistoryClient:
         )
         if failure_class:
             self._gecko_last_rate_limit_class = failure_class
+            self._transport_provider_cooldowns["gecko"] = {
+                "until_monotonic": float(self._gecko_cooldown_until_monotonic),
+                "failure_class": failure_class,
+            }
 
     def _classify_provider_failure(self, *, stage: str, http_status: int | None, warning: str | None) -> tuple[str | None, bool]:
         status = int(http_status or 0)
         normalized_warning = str(warning or "").strip().lower()
+        if normalized_warning == "provider_timeout":
+            return "provider_timeout", True
         if status == 429 or normalized_warning == "provider_rate_limited":
             if stage == "resolver":
                 return "rate_limited_resolver", True
@@ -755,16 +769,44 @@ class PriceHistoryClient:
             return None, True
         return None, True
 
+    def _apply_transport_decision(self, row: dict[str, Any]) -> dict[str, Any]:
+        provider_failure_class = str(row.get("provider_failure_class") or "")
+        if bool(row.get("cooldown_applied")):
+            transport_action = "skip_due_to_cooldown"
+            transport_reason = provider_failure_class or "provider_rate_limited_recently"
+        elif row.get("price_path_status") == "complete" or bool(row.get("partial_but_usable_row")):
+            transport_action = "accept"
+            transport_reason = "usable_price_path"
+        elif provider_failure_class in {"rate_limited_resolver", "rate_limited_ohlcv", "provider_timeout"}:
+            transport_action = "retry_later"
+            transport_reason = provider_failure_class
+        elif provider_failure_class == "ohlcv_not_available":
+            transport_action = "skip_non_retryable"
+            transport_reason = "ohlcv_not_available"
+        else:
+            transport_action = "retry_later" if bool(row.get("provider_failure_retryable", True)) else "skip_non_retryable"
+            transport_reason = provider_failure_class or "provider_http_error"
+        row["transport_action"] = transport_action
+        row["transport_reason"] = transport_reason
+        row["usable_for_replay"] = bool(row.get("replay_usable_price_path")) or bool(row.get("partial_but_usable_row")) or row.get("price_path_status") == "complete"
+        row["usable_for_sampling"] = row["usable_for_replay"]
+        return row
+
     def _gecko_negative_cache_key(self, *, network: str, pool_address: str, interval_sec: int) -> str:
         return f"{network}:{pool_address}:{int(interval_sec)}"
 
     def _gecko_negative_cache_hit(self, *, network: str, pool_address: str, interval_sec: int) -> bool:
         key = self._gecko_negative_cache_key(network=network, pool_address=pool_address, interval_sec=interval_sec)
-        expires_at = float(self._gecko_negative_cache.get(key) or 0.0)
+        expires_at = max(
+            float(self._gecko_negative_cache.get(key) or 0.0),
+            float(self._transport_non_retryable.get(key) or 0.0),
+        )
         now = time.monotonic()
         if expires_at <= now:
             if key in self._gecko_negative_cache:
                 self._gecko_negative_cache.pop(key, None)
+            if key in self._transport_non_retryable:
+                self._transport_non_retryable.pop(key, None)
             return False
         return True
 
@@ -773,6 +815,7 @@ class PriceHistoryClient:
             return
         key = self._gecko_negative_cache_key(network=network, pool_address=pool_address, interval_sec=interval_sec)
         self._gecko_negative_cache[key] = time.monotonic() + self.gecko_ohlcv_404_negative_ttl_sec
+        self._transport_non_retryable[key] = time.monotonic() + self.gecko_ohlcv_404_negative_ttl_sec
 
     def _with_provider_rate_limit_retry(
         self,
@@ -1091,6 +1134,14 @@ class PriceHistoryClient:
         cooldown_applied = False
         cooldown_reason: str | None = None
         negative_cache_hit = False
+        shared_cooldown = self._transport_provider_cooldowns.get("gecko")
+        if isinstance(shared_cooldown, dict):
+            self._gecko_cooldown_until_monotonic = max(
+                float(self._gecko_cooldown_until_monotonic),
+                float(shared_cooldown.get("until_monotonic") or 0.0),
+            )
+            if not self._gecko_last_rate_limit_class:
+                self._gecko_last_rate_limit_class = str(shared_cooldown.get("failure_class") or "") or None
         if self._gecko_cooldown_until_monotonic > time.monotonic():
             cooldown_applied = True
             cooldown_reason = "provider_rate_limited_recently"
@@ -1513,7 +1564,7 @@ class PriceHistoryClient:
     ) -> dict[str, Any]:
         provider_config = self.provider_bootstrap()
         if self.provider == "geckoterminal_pool_ohlcv":
-            return self._fetch_geckoterminal_price_path(
+            result = self._fetch_geckoterminal_price_path(
                 token_address=token_address,
                 pair_address=pair_address,
                 start_ts=start_ts,
@@ -1522,6 +1573,7 @@ class PriceHistoryClient:
                 limit=limit,
                 provider_config=provider_config,
             )
+            return self._apply_transport_decision(result)
 
         request = build_price_history_request(
             provider_config,
@@ -1543,7 +1595,7 @@ class PriceHistoryClient:
         }
         if not request.get("ok"):
             warning = request.get("warning") or provider_config.get("warning") or "price_history_provider_unconfigured"
-            return {
+            return self._apply_transport_decision({
                 "token_address": token_address,
                 "pair_address": pair_address,
                 "source_provider": self.provider,
@@ -1562,7 +1614,7 @@ class PriceHistoryClient:
                 "missing": True,
                 "price_path_status": "missing",
                 "warning": warning,
-            }
+            })
 
         payload = self._get(str(request.get("endpoint") or self.token_endpoint), dict(request.get("params") or {}), dict(request.get("headers") or {}))
         rows = _extract_rows(payload)
@@ -1603,7 +1655,7 @@ class PriceHistoryClient:
             status = "missing"
         elif truncated:
             status = "partial"
-        return {
+        return self._apply_transport_decision({
             "token_address": token_address,
             "pair_address": pair_address,
             "source_provider": self.provider,
@@ -1626,4 +1678,4 @@ class PriceHistoryClient:
             "provider_error_message": provider_error_message,
             "provider_error_body": provider_error_body,
             "provider_error_payload": provider_error_payload,
-        }
+        })
