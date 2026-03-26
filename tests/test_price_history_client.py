@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from collectors.price_history_client import PriceHistoryClient, resolve_price_history_provider, validate_price_history_provider_config
 
 
@@ -13,7 +15,7 @@ class PayloadClient(PriceHistoryClient):
 
 
 class GeckoTerminalClient(PriceHistoryClient):
-    def __init__(self, *, resolver_result=None, ohlcv_payloads=None, **kwargs):
+    def __init__(self, *, resolver_result=None, ohlcv_payloads=None, get_payloads=None, **kwargs):
         super().__init__(
             base_url="https://api.geckoterminal.com/api/v2",
             provider="geckoterminal_pool_ohlcv",
@@ -29,8 +31,16 @@ class GeckoTerminalClient(PriceHistoryClient):
         )
         self.resolver_result = resolver_result
         self.ohlcv_payloads = list(ohlcv_payloads or [])
+        self.get_payloads = list(get_payloads or [])
         self.fetch_calls = []
         self.resolve_calls = []
+        self.get_calls = []
+
+    def _get(self, endpoint, params, headers=None):
+        self.get_calls.append({"endpoint": endpoint, "params": dict(params), "headers": dict(headers or {})})
+        if self.get_payloads:
+            return self.get_payloads.pop(0)
+        return {"data": []}
 
     def _resolve_geckoterminal_pool(self, token_address: str, network: str = "solana"):
         self.resolve_calls.append((token_address, network))
@@ -336,3 +346,65 @@ def test_fetch_gecko_price_path_keeps_partial_status_when_nonempty():
     assert result["price_path_status"] == "partial"
     assert result["missing"] is False
     assert result["obs_len"] == 1
+
+
+def test_resolve_geckoterminal_pool_retries_after_provider_rate_limit(monkeypatch):
+    sleep_calls = []
+    monkeypatch.setattr(time, "sleep", lambda seconds: sleep_calls.append(seconds))
+    client = GeckoTerminalClient(
+        get_payloads=[
+            {"warning": "provider_rate_limited", "http_status": 429, "provider_error_message": "rate limit"},
+            {"data": [{"id": "pool-1", "attributes": {"reserve_in_usd": 10}}], "http_status": 200},
+        ]
+    )
+
+    resolved = client._resolve_geckoterminal_pool("tok", network="solana")
+
+    assert resolved["pool_address"] == "pool-1"
+    assert resolved["endpoint"] == "networks/solana/tokens/tok/pools"
+    assert len(client.get_calls) == 2
+    assert sleep_calls == [1.0]
+
+
+def test_fetch_gecko_price_path_retries_ohlcv_after_provider_rate_limit(monkeypatch):
+    sleep_calls = []
+    monkeypatch.setattr(time, "sleep", lambda seconds: sleep_calls.append(seconds))
+    client = GeckoTerminalClient(
+        resolver_result={"pool_address": "pool-1", "resolver_source": "geckoterminal", "resolver_confidence": "high", "pool_candidates_seen": 1, "pool_resolution_status": "resolved"},
+        ohlcv_payloads=[
+            {"warning": "provider_rate_limited", "http_status": 429, "provider_error_message": "rate limit"},
+            {"data": {"attributes": {"ohlcv_list": [[1000, 1, 1, 1, 1.0, 10]]}}, "http_status": 200},
+        ],
+    )
+
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1000, interval_sec=60, limit=1000)
+
+    assert result["missing"] is False
+    assert result["price_path_status"] == "complete"
+    assert len(client.fetch_calls) == 2
+    assert sleep_calls == [1.0]
+
+
+def test_fetch_gecko_price_path_preserves_resolver_observability_when_pool_missing():
+    client = GeckoTerminalClient(
+        resolver_result={
+            "pool_address": None,
+            "resolver_source": "geckoterminal",
+            "resolver_confidence": "none",
+            "pool_candidates_seen": 0,
+            "pool_resolution_status": "pool_resolution_failed",
+            "warning": "provider_rate_limited",
+            "endpoint": "networks/solana/tokens/tok/pools",
+            "http_status": 429,
+            "provider_error_message": "rate limit",
+            "provider_error_body": "{\"error\":\"limit\"}",
+        }
+    )
+
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1060)
+
+    assert result["endpoint"] == "networks/solana/tokens/tok/pools"
+    assert result["http_status"] == 429
+    assert result["provider_error_message"] == "rate limit"
+    assert result["provider_error_body"] == "{\"error\":\"limit\"}"
+    assert result["provider_request_summary"]["endpoint"] == "networks/solana/tokens/tok/pools"
