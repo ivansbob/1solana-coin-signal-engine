@@ -945,6 +945,7 @@ def _collect_price_paths(
         fallback_mode = str(best_summary.get("strategy"))
     enriched.update(
         {
+            "pair_address": enriched.get("pair_address") or enriched.get("selected_pool_address") or enriched.get("pool_address"),
             "price_history_provider": enriched.get("price_history_provider") or provider_name,
             "price_history_provider_status": enriched.get("price_history_provider_status") or provider_status,
             "provider_bootstrap_ok": bool(enriched.get("provider_bootstrap_ok", True)),
@@ -955,7 +956,6 @@ def _collect_price_paths(
             "attempts": attempt_summaries,
             "resolved_via_fallback": fallback_mode is not None,
             "fallback_mode": fallback_mode,
-            "pair_address": enriched.get("pair_address"),
             "selected_pool_address": enriched.get("selected_pool_address") or enriched.get("pool_address"),
             "pool_resolver_source": enriched.get("pool_resolver_source"),
             "pool_resolver_confidence": enriched.get("pool_resolver_confidence"),
