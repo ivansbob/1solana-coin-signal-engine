@@ -536,6 +536,9 @@ class PriceHistoryClient:
         gecko_rate_limit_cooldown_sec: float = 15.0,
         gecko_ohlcv_404_negative_ttl_sec: float = 1800.0,
         gecko_max_pages_per_token: int = 12,
+        gecko_pool_candidate_limit: int = 3,
+        gecko_try_seeded_pair_first: bool = True,
+        gecko_try_alternate_pools_on_ohlcv_404: bool = True,
         request_timeout_sec: float = 20.0,
         transport_memory: dict[str, Any] | None = None,
     ) -> None:
@@ -562,6 +565,9 @@ class PriceHistoryClient:
         self.gecko_rate_limit_cooldown_sec = max(float(gecko_rate_limit_cooldown_sec or 0.0), 0.0)
         self.gecko_ohlcv_404_negative_ttl_sec = max(float(gecko_ohlcv_404_negative_ttl_sec or 0.0), 0.0)
         self.gecko_max_pages_per_token = max(int(gecko_max_pages_per_token or 1), 1)
+        self.gecko_pool_candidate_limit = max(int(gecko_pool_candidate_limit or 1), 1)
+        self.gecko_try_seeded_pair_first = bool(gecko_try_seeded_pair_first)
+        self.gecko_try_alternate_pools_on_ohlcv_404 = bool(gecko_try_alternate_pools_on_ohlcv_404)
         self.request_timeout_sec = max(float(request_timeout_sec or 20.0), 1.0)
         memory = transport_memory if isinstance(transport_memory, dict) else {}
         self.transport_memory = memory
@@ -616,6 +622,9 @@ class PriceHistoryClient:
                 "gecko_rate_limit_cooldown_sec": self.gecko_rate_limit_cooldown_sec,
                 "gecko_ohlcv_404_negative_ttl_sec": self.gecko_ohlcv_404_negative_ttl_sec,
                 "gecko_max_pages_per_token": self.gecko_max_pages_per_token,
+                "gecko_pool_candidate_limit": self.gecko_pool_candidate_limit,
+                "gecko_try_seeded_pair_first": self.gecko_try_seeded_pair_first,
+                "gecko_try_alternate_pools_on_ohlcv_404": self.gecko_try_alternate_pools_on_ohlcv_404,
                 "request_timeout_sec": self.request_timeout_sec,
             },
         }
@@ -911,8 +920,24 @@ class PriceHistoryClient:
         payload = self._gecko_get(endpoint, params)
         pools = self._extract_geckoterminal_pool_candidates(payload)
         selected = self._select_canonical_pool(pools)
+        canonical_address = str(selected.get("pool_address") or "").strip() if selected else ""
+        alternate_addresses = [
+            str(pool.get("pool_address") or "").strip()
+            for pool in pools
+            if str(pool.get("pool_address") or "").strip() and str(pool.get("pool_address") or "").strip() != canonical_address
+        ]
+        candidate_family: list[dict[str, Any]] = []
+        if canonical_address:
+            candidate_family.append({"pool_address": canonical_address, "source": "canonical_resolved_pool"})
+        for address in alternate_addresses:
+            candidate_family.append({"pool_address": address, "source": "alternate_resolved_pool"})
+        if self.gecko_pool_candidate_limit > 0:
+            candidate_family = candidate_family[: self.gecko_pool_candidate_limit]
         result = {
-            "pool_address": selected.get("pool_address") if selected else None,
+            "pool_address": canonical_address or None,
+            "selected_pool_address": canonical_address or None,
+            "pool_candidates": candidate_family,
+            "pool_candidate_rank": 1 if canonical_address else None,
             "resolver_source": self.pool_resolver or "geckoterminal",
             "resolver_confidence": "high" if selected else "none",
             "pool_candidates_seen": len(pools),
@@ -1119,22 +1144,19 @@ class PriceHistoryClient:
         network = self._geckoterminal_network()
         resolver_endpoint = self._format_endpoint(self.token_endpoint, network=network, token_address=token_address)
         pool_info = {
-            "pool_address": pair_address,
-            "resolver_source": "seed_pair_address" if pair_address else self.pool_resolver or "geckoterminal",
-            "resolver_confidence": "seed" if pair_address else "none",
-            "pool_candidates_seen": 1 if pair_address else 0,
-            "pool_resolution_status": "seed_pair_address" if pair_address else "pool_resolution_failed",
+            "pool_address": None,
+            "selected_pool_address": None,
+            "pool_candidates": [],
+            "pool_candidate_rank": None,
+            "resolver_source": self.pool_resolver or "geckoterminal",
+            "resolver_confidence": "none",
+            "pool_candidates_seen": 0,
+            "pool_resolution_status": "pool_resolution_failed",
             "warning": None,
-            "endpoint": resolver_endpoint if pair_address else None,
+            "endpoint": resolver_endpoint,
             "http_status": None,
-            "pool_resolution_http_status": None,
-            "ohlcv_http_status": None,
             "provider_error_message": None,
             "provider_error_body": None,
-            "terminated_on_rate_limit": False,
-            "rate_limit_stage": "unknown",
-            "ohlcv_pages_attempted": 0,
-            "ohlcv_pages_succeeded": 0,
         }
         provider_failure_class: str | None = None
         provider_failure_retryable = True
@@ -1225,12 +1247,52 @@ class PriceHistoryClient:
                 "negative_cache_hit": negative_cache_hit,
                 **debug_fields,
             }
-        if not pair_address:
-            pool_info = self._resolve_geckoterminal_pool(token_address, network=network)
-        selected_pool_address = pool_info.get("pool_address")
+        resolved_pool_info = self._resolve_geckoterminal_pool(token_address, network=network)
+        if pair_address:
+            merged_pool_info = dict(resolved_pool_info)
+            merged_pool_info.setdefault("resolver_source", pool_info.get("resolver_source"))
+            merged_pool_info.setdefault("resolver_confidence", pool_info.get("resolver_confidence"))
+            pool_info = merged_pool_info
+        else:
+            pool_info = resolved_pool_info
+        resolver_candidates = list(pool_info.get("pool_candidates") or [])
+        candidate_family: list[dict[str, Any]] = []
+        seen_candidates: set[str] = set()
+        canonical_from_pool_info = str(
+            pool_info.get("selected_pool_address") or pool_info.get("pool_address") or ""
+        ).strip()
+        if pair_address and self.gecko_try_seeded_pair_first:
+            candidate_family.append({"pool_address": pair_address, "source": "seeded_pair_hint"})
+        if canonical_from_pool_info:
+            candidate_family.append({"pool_address": canonical_from_pool_info, "source": "canonical_resolved_pool"})
+        for candidate in resolver_candidates:
+            address = str(candidate.get("pool_address") or "").strip()
+            if address:
+                candidate_family.append({
+                    "pool_address": address,
+                    "source": str(candidate.get("source") or "resolved_pool_candidate"),
+                })
+        if pair_address and not self.gecko_try_seeded_pair_first:
+            candidate_family.append({"pool_address": pair_address, "source": "seeded_pair_hint"})
+        deduped_candidates: list[dict[str, Any]] = []
+        for candidate in candidate_family:
+            address = str(candidate.get("pool_address") or "").strip()
+            if not address or address in seen_candidates:
+                continue
+            seen_candidates.add(address)
+            deduped_candidates.append({
+                "pool_address": address,
+                "source": str(candidate.get("source") or "resolved_pool_candidate"),
+            })
+        if self.gecko_pool_candidate_limit > 0:
+            deduped_candidates = deduped_candidates[: self.gecko_pool_candidate_limit]
+
+        selected_pool_address = deduped_candidates[0]["pool_address"] if deduped_candidates else None
+        selected_pool_candidate_source = deduped_candidates[0]["source"] if deduped_candidates else None
         request_summary.update({
             "network": network,
             "selected_pool_address": selected_pool_address,
+            "pool_candidates": list(deduped_candidates),
             "pool_resolver_source": pool_info.get("resolver_source"),
             "pool_resolver_confidence": pool_info.get("resolver_confidence"),
             "pool_candidates_seen": pool_info.get("pool_candidates_seen"),
@@ -1290,6 +1352,12 @@ class PriceHistoryClient:
                 "pair_address": pair_address,
                 "pool_address": None,
                 "selected_pool_address": None,
+                "pool_candidates": deduped_candidates,
+                "selected_pool_candidate_rank": None,
+                "selected_pool_candidate_source": None,
+                "attempted_pool_candidates": [],
+                "provider_family_exhausted": True,
+                "provider_family_attempt_count": 0,
                 "pool_resolver_source": pool_info.get("resolver_source"),
                 "pool_resolver_confidence": pool_info.get("resolver_confidence"),
                 "pool_candidates_seen": pool_info.get("pool_candidates_seen"),
@@ -1335,47 +1403,163 @@ class PriceHistoryClient:
                 "negative_cache_hit": negative_cache_hit,
                 **debug_fields,
             }
-        ohlcv_endpoint = self._format_endpoint(self.pair_endpoint, network=network, pool_address=selected_pool_address, timeframe="minute")
-        request_summary["endpoint"] = ohlcv_endpoint
-        request_summary["resolver_endpoint"] = pool_info.get("endpoint")
-        request_summary["ohlcv_endpoint"] = ohlcv_endpoint
-        raw_rows: list[list[Any]] = []
-        before_ts = end_ts
-        warning = None
-        endpoint = ohlcv_endpoint
-        http_status = None
-        pool_resolution_http_status = pool_info.get("http_status")
-        ohlcv_http_status = None
-        provider_error_message = None
-        provider_error_body = None
-        terminated_on_rate_limit = False
-        rate_limit_stage = "unknown"
-        ohlcv_pages_attempted = 0
-        ohlcv_pages_succeeded = 0
-        seen_oldest: set[int] = set()
-        max_page_limit = min(max(limit, 1), self.max_ohlcv_limit)
-        if self._gecko_negative_cache_hit(network=network, pool_address=selected_pool_address, interval_sec=interval_sec):
-            negative_cache_hit = True
-            provider_failure_class = "ohlcv_not_available"
-            provider_failure_retryable = False
-            provider_failure_stage = "ohlcv"
-            warning = "no_pool_ohlcv_rows"
+        attempted_pool_candidates: list[dict[str, Any]] = []
+        provider_family_attempt_count = 0
+        last_result: dict[str, Any] | None = None
+        for candidate_idx, candidate in enumerate(deduped_candidates, start=1):
+            selected_pool_address = candidate["pool_address"]
+            selected_pool_candidate_source = candidate["source"]
+            provider_failure_class = None
+            provider_failure_retryable = True
+            provider_failure_stage = None
+            ohlcv_endpoint = self._format_endpoint(self.pair_endpoint, network=network, pool_address=selected_pool_address, timeframe="minute")
+            request_summary["endpoint"] = ohlcv_endpoint
+            request_summary["resolver_endpoint"] = pool_info.get("endpoint")
+            request_summary["ohlcv_endpoint"] = ohlcv_endpoint
+            request_summary["selected_pool_address"] = selected_pool_address
+            request_summary["selected_pool_candidate_rank"] = candidate_idx
+            request_summary["selected_pool_candidate_source"] = selected_pool_candidate_source
+            request_params["pool_address"] = selected_pool_address
+            raw_rows: list[list[Any]] = []
+            before_ts = end_ts
+            warning = None
+            endpoint = ohlcv_endpoint
+            http_status = None
+            pool_resolution_http_status = pool_info.get("http_status")
+            ohlcv_http_status = None
+            provider_error_message = None
+            provider_error_body = None
+            terminated_on_rate_limit = False
+            rate_limit_stage = "unknown"
+            ohlcv_pages_attempted = 0
+            ohlcv_pages_succeeded = 0
+            seen_oldest: set[int] = set()
+            max_page_limit = min(max(limit, 1), self.max_ohlcv_limit)
+            provider_family_attempt_count += 1
+            candidate_negative_cache_hit = False
+            if self._gecko_negative_cache_hit(network=network, pool_address=selected_pool_address, interval_sec=interval_sec):
+                candidate_negative_cache_hit = True
+                negative_cache_hit = True
+                provider_failure_class = "ohlcv_not_available"
+                provider_failure_retryable = False
+                provider_failure_stage = "ohlcv"
+                warning = "no_pool_ohlcv_rows"
+            else:
+                while ohlcv_pages_attempted < self.gecko_max_pages_per_token:
+                    ohlcv_pages_attempted += 1
+                    payload = self._fetch_geckoterminal_pool_ohlcv(
+                        selected_pool_address,
+                        start_ts=start_ts,
+                        end_ts=before_ts,
+                        interval_sec=interval_sec,
+                        limit=max_page_limit,
+                        network=network,
+                    )
+                    batch = self._extract_geckoterminal_ohlcv_rows(payload)
+                    raw_rows.extend(batch)
+                    if isinstance(payload, dict):
+                        warning = payload.get("warning") or warning
+                        ohlcv_http_status = payload.get("http_status", ohlcv_http_status)
+                        http_status = ohlcv_http_status
+                        provider_error_message = payload.get("provider_error_message", provider_error_message)
+                        provider_error_body = payload.get("provider_error_body", provider_error_body)
+                        endpoint = payload.get("endpoint") or endpoint
+                        if warning == "provider_rate_limited" or int(ohlcv_http_status or 0) == 429:
+                            terminated_on_rate_limit = True
+                            rate_limit_stage = "ohlcv"
+                            provider_failure_class = "rate_limited_ohlcv"
+                            provider_failure_retryable = True
+                            provider_failure_stage = "ohlcv"
+                            self._set_gecko_cooldown(failure_class=provider_failure_class)
+                            break
+                        if int(ohlcv_http_status or 0) == 404:
+                            provider_failure_class = "ohlcv_not_available"
+                            provider_failure_retryable = False
+                            provider_failure_stage = "ohlcv"
+                            self._remember_gecko_ohlcv_not_available(
+                                network=network,
+                                pool_address=selected_pool_address,
+                                interval_sec=interval_sec,
+                            )
+                            break
+                    if batch:
+                        ohlcv_pages_succeeded += 1
+                    if not batch:
+                        break
+                    oldest_ts = min(_coerce_int(row[0]) or 0 for row in batch)
+                    if oldest_ts <= int(start_ts or oldest_ts) or len(batch) < max_page_limit or oldest_ts in seen_oldest:
+                        break
+                    seen_oldest.add(oldest_ts)
+                    before_ts = oldest_ts - 1
+
+            observations, densify_metadata = self._normalize_geckoterminal_ohlcv_list(
+                raw_rows,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                interval_sec=interval_sec,
+            )
+            missing = not observations
+            truncated = bool(end_ts is not None and observations and observations[-1]["timestamp"] < int(end_ts))
+            if missing:
+                warning = warning or "no_pool_ohlcv_rows"
+            elif terminated_on_rate_limit or truncated:
+                warning = warning or "price_path_incomplete"
+            status = "missing" if missing else ("partial" if (terminated_on_rate_limit or truncated) else "complete")
             debug_fields = self._build_gecko_path_debug_fields(
-                status="missing",
-                observations=[],
-                truncated=False,
-                terminated_on_rate_limit=False,
-                rate_limit_stage="unknown",
+                status=status,
+                observations=observations,
+                truncated=truncated,
+                terminated_on_rate_limit=terminated_on_rate_limit,
+                rate_limit_stage=rate_limit_stage,
                 resolver_endpoint=pool_info.get("endpoint"),
                 ohlcv_endpoint=ohlcv_endpoint,
                 pool_resolution_http_status=pool_resolution_http_status,
-                ohlcv_http_status=404,
+                ohlcv_http_status=ohlcv_http_status,
             )
-            return {
+            if provider_failure_class is None:
+                provider_failure_class, provider_failure_retryable = self._classify_provider_failure(
+                    stage="ohlcv",
+                    http_status=ohlcv_http_status,
+                    warning=warning,
+                )
+                provider_failure_stage = "ohlcv" if provider_failure_class else None
+            attempted_pool_candidates.append(
+                {
+                    "pool_address": selected_pool_address,
+                    "candidate_rank": candidate_idx,
+                    "candidate_source": selected_pool_candidate_source,
+                    "price_path_status": status,
+                    "warning": warning,
+                    "provider_failure_class": provider_failure_class,
+                    "negative_cache_hit": candidate_negative_cache_hit,
+                }
+            )
+            provider_family_exhausted = candidate_idx >= len(deduped_candidates)
+            request_summary.update(
+                {
+                    "attempted_pool_candidates": attempted_pool_candidates,
+                    "provider_family_attempt_count": provider_family_attempt_count,
+                    "provider_family_exhausted": provider_family_exhausted,
+                    "rate_limit_stage": rate_limit_stage,
+                    "rate_limit_endpoint": debug_fields.get("rate_limit_endpoint"),
+                    "rate_limit_http_status": debug_fields.get("rate_limit_http_status"),
+                    "partial_but_usable_row": debug_fields.get("partial_but_usable_row"),
+                    "replay_usable_price_path": debug_fields.get("replay_usable_price_path"),
+                    "replay_data_hint": debug_fields.get("replay_data_hint"),
+                    "collection_termination_reason": debug_fields.get("collection_termination_reason"),
+                }
+            )
+            last_result = {
                 "token_address": token_address,
                 "pair_address": pair_address,
                 "pool_address": selected_pool_address,
                 "selected_pool_address": selected_pool_address,
+                "pool_candidates": deduped_candidates,
+                "selected_pool_candidate_rank": candidate_idx,
+                "selected_pool_candidate_source": selected_pool_candidate_source,
+                "attempted_pool_candidates": attempted_pool_candidates,
+                "provider_family_exhausted": provider_family_exhausted,
+                "provider_family_attempt_count": provider_family_attempt_count,
                 "pool_resolver_source": pool_info.get("resolver_source"),
                 "pool_resolver_confidence": pool_info.get("resolver_confidence"),
                 "pool_candidates_seen": pool_info.get("pool_candidates_seen"),
@@ -1390,29 +1574,29 @@ class PriceHistoryClient:
                 "requested_end_ts": end_ts,
                 "interval_sec": interval_sec,
                 "request_params": request_params,
-                "provider_row_count": 0,
-                "obs_len": 0,
-                "gap_fill_applied": False,
-                "gap_fill_count": 0,
-                "observed_row_count": 0,
-                "densified_row_count": 0,
-                "price_path_origin": "provider_observed",
-                "price_path": [],
-                "truncated": False,
-                "missing": True,
-                "price_path_status": "missing",
+                "provider_row_count": len(raw_rows),
+                "obs_len": len(observations),
+                "gap_fill_applied": bool(densify_metadata.get("gap_fill_applied")),
+                "gap_fill_count": int(densify_metadata.get("gap_fill_count") or 0),
+                "observed_row_count": int(densify_metadata.get("observed_row_count") or 0),
+                "densified_row_count": int(densify_metadata.get("densified_row_count") or 0),
+                "price_path_origin": densify_metadata.get("price_path_origin") or "provider_observed",
+                "price_path": observations,
+                "truncated": truncated,
+                "missing": missing,
+                "price_path_status": status,
                 "warning": warning,
-                "endpoint": ohlcv_endpoint,
-                "http_status": 404,
+                "endpoint": endpoint,
+                "http_status": http_status,
                 "pool_resolution_http_status": pool_resolution_http_status,
-                "ohlcv_http_status": 404,
-                "provider_error_message": None,
-                "provider_error_body": None,
+                "ohlcv_http_status": ohlcv_http_status,
+                "provider_error_message": provider_error_message,
+                "provider_error_body": provider_error_body,
                 "provider_error_payload": None,
-                "terminated_on_rate_limit": False,
-                "rate_limit_stage": "unknown",
-                "ohlcv_pages_attempted": 0,
-                "ohlcv_pages_succeeded": 0,
+                "terminated_on_rate_limit": terminated_on_rate_limit,
+                "rate_limit_stage": rate_limit_stage,
+                "ohlcv_pages_attempted": ohlcv_pages_attempted,
+                "ohlcv_pages_succeeded": ohlcv_pages_succeeded,
                 "provider_failure_class": provider_failure_class,
                 "provider_failure_retryable": provider_failure_retryable,
                 "provider_failure_stage": provider_failure_stage,
@@ -1421,99 +1605,41 @@ class PriceHistoryClient:
                 "negative_cache_hit": negative_cache_hit,
                 **debug_fields,
             }
-        while ohlcv_pages_attempted < self.gecko_max_pages_per_token:
-            ohlcv_pages_attempted += 1
-            payload = self._fetch_geckoterminal_pool_ohlcv(
-                selected_pool_address,
-                start_ts=start_ts,
-                end_ts=before_ts,
-                interval_sec=interval_sec,
-                limit=max_page_limit,
-                network=network,
-            )
-            batch = self._extract_geckoterminal_ohlcv_rows(payload)
-            raw_rows.extend(batch)
-            if isinstance(payload, dict):
-                warning = payload.get("warning") or warning
-                ohlcv_http_status = payload.get("http_status", ohlcv_http_status)
-                http_status = ohlcv_http_status
-                provider_error_message = payload.get("provider_error_message", provider_error_message)
-                provider_error_body = payload.get("provider_error_body", provider_error_body)
-                endpoint = payload.get("endpoint") or endpoint
-                if warning == "provider_rate_limited" or int(ohlcv_http_status or 0) == 429:
-                    terminated_on_rate_limit = True
-                    rate_limit_stage = "ohlcv"
-                    provider_failure_class = "rate_limited_ohlcv"
-                    provider_failure_retryable = True
-                    provider_failure_stage = "ohlcv"
-                    self._set_gecko_cooldown(failure_class=provider_failure_class)
-                    break
-                if int(ohlcv_http_status or 0) == 404:
-                    provider_failure_class = "ohlcv_not_available"
-                    provider_failure_retryable = False
-                    provider_failure_stage = "ohlcv"
-                    self._remember_gecko_ohlcv_not_available(
-                        network=network,
-                        pool_address=selected_pool_address,
-                        interval_sec=interval_sec,
-                    )
-                    break
-            if batch:
-                ohlcv_pages_succeeded += 1
-            if not batch:
-                break
-            oldest_ts = min(_coerce_int(row[0]) or 0 for row in batch)
-            if oldest_ts <= int(start_ts or oldest_ts) or len(batch) < max_page_limit or oldest_ts in seen_oldest:
-                break
-            seen_oldest.add(oldest_ts)
-            before_ts = oldest_ts - 1
-        observations, densify_metadata = self._normalize_geckoterminal_ohlcv_list(
-            raw_rows,
-            start_ts=start_ts,
-            end_ts=end_ts,
-            interval_sec=interval_sec,
-        )
-        missing = not observations
-        truncated = bool(end_ts is not None and observations and observations[-1]["timestamp"] < int(end_ts))
-        if missing:
-            warning = warning or "no_pool_ohlcv_rows"
-        elif terminated_on_rate_limit or truncated:
-            warning = warning or "price_path_incomplete"
-        status = "missing" if missing else ("partial" if (terminated_on_rate_limit or truncated) else "complete")
+            if status in {"complete", "partial"}:
+                last_result["provider_family_exhausted"] = False
+                return last_result
+            if terminated_on_rate_limit:
+                last_result["provider_family_exhausted"] = False
+                return last_result
+            if provider_failure_class == "ohlcv_not_available" and not self.gecko_try_alternate_pools_on_ohlcv_404:
+                last_result["provider_family_exhausted"] = False
+                return last_result
+        if last_result is not None:
+            last_result["provider_family_exhausted"] = True
+            return last_result
+        # unreachable defensive return
         debug_fields = self._build_gecko_path_debug_fields(
-            status=status,
-            observations=observations,
-            truncated=truncated,
-            terminated_on_rate_limit=terminated_on_rate_limit,
-            rate_limit_stage=rate_limit_stage,
+            status="missing",
+            observations=[],
+            truncated=False,
+            terminated_on_rate_limit=False,
+            rate_limit_stage="unknown",
             resolver_endpoint=pool_info.get("endpoint"),
-            ohlcv_endpoint=ohlcv_endpoint,
-            pool_resolution_http_status=pool_resolution_http_status,
-            ohlcv_http_status=ohlcv_http_status,
+            ohlcv_endpoint=None,
+            pool_resolution_http_status=pool_info.get("http_status"),
+            ohlcv_http_status=None,
         )
-        request_summary.update(
-            {
-                "rate_limit_stage": rate_limit_stage,
-                "rate_limit_endpoint": debug_fields.get("rate_limit_endpoint"),
-                "rate_limit_http_status": debug_fields.get("rate_limit_http_status"),
-                "partial_but_usable_row": debug_fields.get("partial_but_usable_row"),
-                "replay_usable_price_path": debug_fields.get("replay_usable_price_path"),
-                "replay_data_hint": debug_fields.get("replay_data_hint"),
-                "collection_termination_reason": debug_fields.get("collection_termination_reason"),
-            }
-        )
-        if provider_failure_class is None:
-            provider_failure_class, provider_failure_retryable = self._classify_provider_failure(
-                stage="ohlcv",
-                http_status=ohlcv_http_status,
-                warning=warning,
-            )
-            provider_failure_stage = "ohlcv" if provider_failure_class else None
         return {
             "token_address": token_address,
             "pair_address": pair_address,
-            "pool_address": selected_pool_address,
-            "selected_pool_address": selected_pool_address,
+            "pool_address": None,
+            "selected_pool_address": None,
+            "pool_candidates": deduped_candidates,
+            "selected_pool_candidate_rank": None,
+            "selected_pool_candidate_source": None,
+            "attempted_pool_candidates": attempted_pool_candidates,
+            "provider_family_exhausted": True,
+            "provider_family_attempt_count": provider_family_attempt_count,
             "pool_resolver_source": pool_info.get("resolver_source"),
             "pool_resolver_confidence": pool_info.get("resolver_confidence"),
             "pool_candidates_seen": pool_info.get("pool_candidates_seen"),
@@ -1528,32 +1654,32 @@ class PriceHistoryClient:
             "requested_end_ts": end_ts,
             "interval_sec": interval_sec,
             "request_params": request_params,
-            "provider_row_count": len(raw_rows),
-            "obs_len": len(observations),
-            "gap_fill_applied": bool(densify_metadata.get("gap_fill_applied")),
-            "gap_fill_count": int(densify_metadata.get("gap_fill_count") or 0),
-            "observed_row_count": int(densify_metadata.get("observed_row_count") or 0),
-            "densified_row_count": int(densify_metadata.get("densified_row_count") or 0),
-            "price_path_origin": densify_metadata.get("price_path_origin") or "provider_observed",
-            "price_path": observations,
-            "truncated": truncated,
-            "missing": missing,
-            "price_path_status": status,
-            "warning": warning,
-            "endpoint": endpoint,
-            "http_status": http_status,
-            "pool_resolution_http_status": pool_resolution_http_status,
-            "ohlcv_http_status": ohlcv_http_status,
-            "provider_error_message": provider_error_message,
-            "provider_error_body": provider_error_body,
+            "provider_row_count": 0,
+            "obs_len": 0,
+            "gap_fill_applied": False,
+            "gap_fill_count": 0,
+            "observed_row_count": 0,
+            "densified_row_count": 0,
+            "price_path_origin": "provider_observed",
+            "price_path": [],
+            "truncated": False,
+            "missing": True,
+            "price_path_status": "missing",
+            "warning": "price_path_attempts_exhausted",
+            "endpoint": None,
+            "http_status": None,
+            "pool_resolution_http_status": pool_info.get("http_status"),
+            "ohlcv_http_status": None,
+            "provider_error_message": None,
+            "provider_error_body": None,
             "provider_error_payload": None,
-            "terminated_on_rate_limit": terminated_on_rate_limit,
-            "rate_limit_stage": rate_limit_stage,
-            "ohlcv_pages_attempted": ohlcv_pages_attempted,
-            "ohlcv_pages_succeeded": ohlcv_pages_succeeded,
-            "provider_failure_class": provider_failure_class,
-            "provider_failure_retryable": provider_failure_retryable,
-            "provider_failure_stage": provider_failure_stage,
+            "terminated_on_rate_limit": False,
+            "rate_limit_stage": "unknown",
+            "ohlcv_pages_attempted": 0,
+            "ohlcv_pages_succeeded": 0,
+            "provider_failure_class": "ohlcv_not_available",
+            "provider_failure_retryable": False,
+            "provider_failure_stage": "ohlcv",
             "cooldown_applied": cooldown_applied,
             "cooldown_reason": cooldown_reason,
             "negative_cache_hit": negative_cache_hit,

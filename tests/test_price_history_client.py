@@ -598,6 +598,123 @@ def test_transport_decision_timeout_maps_to_retry_later():
     assert result["transport_action"] == "retry_later"
 
 
+def test_gecko_returns_ranked_pool_candidates():
+    client = GeckoTerminalClient(
+        resolver_result={
+            "pool_address": "pool-can",
+            "selected_pool_address": "pool-can",
+            "pool_candidates": [
+                {"pool_address": "pool-can", "source": "canonical_resolved_pool"},
+                {"pool_address": "pool-alt", "source": "alternate_resolved_pool"},
+            ],
+            "resolver_source": "geckoterminal",
+            "resolver_confidence": "high",
+            "pool_candidates_seen": 2,
+            "pool_resolution_status": "resolved",
+        },
+        ohlcv_payloads=[{"data": {"attributes": {"ohlcv_list": [[1000, 1, 1, 1, 1.0, 10]]}}}],
+    )
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1000, interval_sec=60, limit=2)
+    assert result["pool_candidates"][0]["pool_address"] == "pool-can"
+    assert result["selected_pool_candidate_rank"] == 1
+    assert result["selected_pool_candidate_source"] == "canonical_resolved_pool"
+
+
+def test_gecko_falls_back_to_next_pool_candidate_after_404():
+    client = GeckoTerminalClient(
+        resolver_result={
+            "pool_address": "pool-404",
+            "selected_pool_address": "pool-404",
+            "pool_candidates": [
+                {"pool_address": "pool-404", "source": "canonical_resolved_pool"},
+                {"pool_address": "pool-ok", "source": "alternate_resolved_pool"},
+            ],
+            "resolver_source": "geckoterminal",
+            "resolver_confidence": "high",
+            "pool_candidates_seen": 2,
+            "pool_resolution_status": "resolved",
+        },
+        ohlcv_payloads=[
+            {"warning": "provider_http_error", "http_status": 404},
+            {"data": {"attributes": {"ohlcv_list": [[1000, 1, 1, 1, 1.1, 11]]}}},
+        ],
+    )
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1000, interval_sec=60, limit=2)
+    assert result["missing"] is False
+    assert result["selected_pool_address"] == "pool-ok"
+    assert result["selected_pool_candidate_rank"] == 2
+    assert result["provider_family_exhausted"] is False
+
+
+def test_gecko_negative_cache_is_pool_scoped_not_token_scoped():
+    client = GeckoTerminalClient(
+        resolver_result={
+            "pool_address": "pool-a",
+            "selected_pool_address": "pool-a",
+            "pool_candidates": [
+                {"pool_address": "pool-a", "source": "canonical_resolved_pool"},
+                {"pool_address": "pool-b", "source": "alternate_resolved_pool"},
+            ],
+            "resolver_source": "geckoterminal",
+            "resolver_confidence": "high",
+            "pool_candidates_seen": 2,
+            "pool_resolution_status": "resolved",
+        },
+        ohlcv_payloads=[
+            {"warning": "provider_http_error", "http_status": 404},
+            {"data": {"attributes": {"ohlcv_list": [[1000, 1, 1, 1, 1.2, 10]]}}},
+        ],
+    )
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1000, interval_sec=60, limit=2)
+    assert any(item["pool_address"] == "pool-a" and item["negative_cache_hit"] is False for item in result["attempted_pool_candidates"])
+    assert result["selected_pool_address"] == "pool-b"
+
+
+def test_seed_pair_is_treated_as_hint_not_terminal_source():
+    client = GeckoTerminalClient(
+        resolver_result={
+            "pool_address": "pool-canonical",
+            "selected_pool_address": "pool-canonical",
+            "pool_candidates": [
+                {"pool_address": "pool-canonical", "source": "canonical_resolved_pool"},
+            ],
+            "resolver_source": "geckoterminal",
+            "resolver_confidence": "high",
+            "pool_candidates_seen": 1,
+            "pool_resolution_status": "resolved",
+        },
+        ohlcv_payloads=[
+            {"warning": "provider_http_error", "http_status": 404},
+            {"data": {"attributes": {"ohlcv_list": [[1000, 1, 1, 1, 1.3, 10]]}}},
+        ],
+    )
+    result = client.fetch_price_path(token_address="tok", pair_address="seed-pool", start_ts=1000, end_ts=1000, interval_sec=60, limit=2)
+    assert result["attempted_pool_candidates"][0]["candidate_source"] == "seeded_pair_hint"
+    assert result["selected_pool_candidate_source"] in {"canonical_resolved_pool", "alternate_resolved_pool"}
+
+
+def test_gecko_marks_provider_family_exhausted_only_after_all_candidates_fail():
+    client = GeckoTerminalClient(
+        resolver_result={
+            "pool_address": "pool-a",
+            "selected_pool_address": "pool-a",
+            "pool_candidates": [
+                {"pool_address": "pool-a", "source": "canonical_resolved_pool"},
+                {"pool_address": "pool-b", "source": "alternate_resolved_pool"},
+            ],
+            "resolver_source": "geckoterminal",
+            "resolver_confidence": "high",
+            "pool_candidates_seen": 2,
+            "pool_resolution_status": "resolved",
+        },
+        ohlcv_payloads=[{"warning": "provider_http_error", "http_status": 404}, {"warning": "provider_http_error", "http_status": 404}],
+    )
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1000, interval_sec=60, limit=2)
+    assert result["missing"] is True
+    assert result["provider_family_exhausted"] is True
+    assert result["provider_family_attempt_count"] == 2
+
+
 def test_router_prefers_seeded_pair_before_token_lookup():
     calls = []
 

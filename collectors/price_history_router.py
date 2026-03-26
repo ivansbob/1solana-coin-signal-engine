@@ -74,6 +74,8 @@ def build_route_attempt_plan(
 
 
 def _is_non_retryable(row: dict[str, Any]) -> bool:
+    if row.get("provider_family_exhausted") is False:
+        return False
     failure_class = str(row.get("provider_failure_class") or "")
     if bool(row.get("negative_cache_hit")):
         return True
@@ -166,6 +168,8 @@ def route_price_history(
             "route_kind": attempt["kind"],
             "route_seed": attempt.get("pair_address"),
             "route_seed_source": attempt.get("seed_source"),
+            "route_candidate_rank": row.get("selected_pool_candidate_rank"),
+            "route_pool_address": row.get("selected_pool_address") or row.get("pool_address"),
             "route_group": attempt.get("route_group"),
             "price_path_status": row.get("price_path_status"),
             "partial_but_usable_row": bool(row.get("partial_but_usable_row")),
@@ -175,6 +179,7 @@ def route_price_history(
             "provider_failure_retryable": row.get("provider_failure_retryable"),
             "cooldown_applied": bool(row.get("cooldown_applied")),
             "negative_cache_hit": bool(row.get("negative_cache_hit")),
+            "provider_family_exhausted": bool(row.get("provider_family_exhausted")),
         }
         route_attempts.append(attempt_meta)
 
