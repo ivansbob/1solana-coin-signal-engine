@@ -284,6 +284,7 @@ def test_collect_price_paths_non_retryable_provider_failure_stops_attempts(monke
                 "warning": "no_pool_ohlcv_rows",
                 "provider_failure_class": "ohlcv_not_available",
                 "provider_failure_retryable": False,
+                "provider_family_exhausted": True,
                 "cooldown_applied": False,
                 "cooldown_reason": None,
                 "negative_cache_hit": False,
@@ -1294,3 +1295,107 @@ def test_chain_backfill_propagates_selected_route_metadata(monkeypatch):
     assert result["selected_route_provider"] == "birdeye_ohlcv_v3"
     assert result["selected_route_kind"] in {"pair", "pool", "token"}
     assert isinstance(result["price_history_route_attempts"], list)
+
+
+def test_chain_backfill_does_not_stop_after_single_pool_404_when_family_not_exhausted(monkeypatch):
+    class FamilyAwareClient:
+        calls = 0
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fetch_price_path(self, **kwargs):
+            FamilyAwareClient.calls += 1
+            if FamilyAwareClient.calls == 1:
+                return {
+                    "token_address": kwargs["token_address"],
+                    "pair_address": kwargs.get("pair_address"),
+                    "price_path": [],
+                    "missing": True,
+                    "price_path_status": "missing",
+                    "provider_failure_class": "ohlcv_not_available",
+                    "provider_failure_retryable": False,
+                    "provider_family_exhausted": False,
+                    "transport_action": "retry_later",
+                }
+            return {
+                "token_address": kwargs["token_address"],
+                "pair_address": kwargs.get("pair_address"),
+                "price_path": [{"timestamp": 1000, "offset_sec": 0, "price": 1.0}],
+                "missing": False,
+                "price_path_status": "partial",
+                "partial_but_usable_row": True,
+                "provider_family_exhausted": True,
+                "selected_pool_candidate_rank": 2,
+                "provider_family_attempt_count": 2,
+                "transport_action": "accept",
+            }
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FamilyAwareClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok-family", "pair_address": "pair", "pair_created_at_ts": 1000},
+        {},
+        _base_config(price_path_retry_attempts=2),
+    )[0]
+    assert FamilyAwareClient.calls >= 2
+    assert result["missing"] is False
+
+
+def test_chain_backfill_summary_counts_candidate_pool_attempts(monkeypatch, tmp_path):
+    class CandidateCounterClient(FakePriceHistoryClient):
+        def fetch_price_path(self, **kwargs):
+            row = super().fetch_price_path(**kwargs)
+            row["provider_family_attempt_count"] = 3
+            row["provider_family_exhausted"] = True
+            row["selected_pool_candidate_rank"] = 2
+            return row
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(chain_backfill, "SolanaRpcClient", FakeRpcClient)
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", CandidateCounterClient)
+    chain_backfill.build_chain_context(
+        [{"token_address": "tok-1", "pair_address": "pair", "pair_created_at_ts": 1000}],
+        _base_config(price_path_retry_attempts=1),
+        dry_run=False,
+    )
+    summary = (tmp_path / "data/processed/chain_backfill.transport_summary.json").read_text(encoding="utf-8")
+    assert '"candidate_pool_attempt_count": 3' in summary
+    assert '"provider_family_exhausted_count": 1' in summary
+
+
+def test_chain_backfill_summary_counts_provider_family_exhaustions(monkeypatch, tmp_path):
+    class ExhaustedClient(FakePriceHistoryClient):
+        def fetch_price_path(self, **kwargs):
+            row = super().fetch_price_path(**kwargs)
+            row["provider_family_exhausted"] = True
+            row["provider_family_attempt_count"] = 1
+            return row
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(chain_backfill, "SolanaRpcClient", FakeRpcClient)
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", ExhaustedClient)
+    chain_backfill.build_chain_context(
+        [{"token_address": "tok-x", "pair_address": "pair", "pair_created_at_ts": 1000}],
+        _base_config(price_path_retry_attempts=1),
+        dry_run=False,
+    )
+    summary = (tmp_path / "data/processed/chain_backfill.transport_summary.json").read_text(encoding="utf-8")
+    assert '"provider_family_exhausted_count": 1' in summary
+
+
+def test_chain_backfill_propagates_selected_pool_candidate_rank(monkeypatch):
+    class RankClient(FakePriceHistoryClient):
+        def fetch_price_path(self, **kwargs):
+            row = super().fetch_price_path(**kwargs)
+            row["selected_pool_candidate_rank"] = 2
+            row["provider_family_attempt_count"] = 2
+            row["provider_family_exhausted"] = False
+            return row
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", RankClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok-rank", "pair_address": "pair", "pair_created_at_ts": 1000},
+        {},
+        _base_config(price_path_retry_attempts=1),
+    )[0]
+    assert result["selected_pool_candidate_rank"] == 2

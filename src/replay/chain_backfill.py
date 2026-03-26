@@ -850,6 +850,9 @@ def _collect_price_paths(
     stop_after_non_retryable_provider_failure = bool(
         bcfg.get("price_path_stop_after_non_retryable_provider_failure", True)
     )
+    stop_after_provider_family_exhausted = bool(
+        bcfg.get("gecko_stop_after_provider_family_exhausted", True)
+    )
     limit = max(int(bcfg.get("price_path_limit", 256) or 256), 1)
     def _client_for_provider(provider_cfg: dict[str, Any], provider_status_value: str | None, provider_source: str | None) -> PriceHistoryClient:
         return PriceHistoryClient(
@@ -876,6 +879,9 @@ def _collect_price_paths(
             gecko_rate_limit_cooldown_sec=float(bcfg.get("gecko_rate_limit_cooldown_sec", 15.0) or 15.0),
             gecko_ohlcv_404_negative_ttl_sec=float(bcfg.get("gecko_ohlcv_404_negative_ttl_sec", 1800.0) or 1800.0),
             gecko_max_pages_per_token=int(bcfg.get("gecko_max_pages_per_token", 12) or 12),
+            gecko_pool_candidate_limit=int(bcfg.get("gecko_pool_candidate_limit", 3) or 3),
+            gecko_try_seeded_pair_first=bool(bcfg.get("gecko_try_seeded_pair_first", True)),
+            gecko_try_alternate_pools_on_ohlcv_404=bool(bcfg.get("gecko_try_alternate_pools_on_ohlcv_404", True)),
             request_timeout_sec=float(bcfg.get("gecko_request_timeout_sec", bcfg.get("request_timeout_sec", 20)) or 20),
             transport_memory=transport_memory,
         )
@@ -1003,9 +1009,8 @@ def _collect_price_paths(
         if bool(path.get("terminated_on_rate_limit")):
             break
         if stop_after_non_retryable_provider_failure and (
-            path.get("provider_failure_retryable") is False
-            or bool(path.get("negative_cache_hit"))
-            or bool(path.get("cooldown_applied"))
+            bool(path.get("cooldown_applied"))
+            or (stop_after_provider_family_exhausted and bool(path.get("provider_family_exhausted")))
         ):
             break
 
@@ -1204,6 +1209,10 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
         "failure_class_counts": {},
         "status_counts": {"complete": 0, "partial_usable": 0, "missing": 0},
         "fallback_used_count": 0,
+        "provider_family_exhausted_count": 0,
+        "candidate_pool_attempt_count": 0,
+        "candidate_pool_success_count": 0,
+        "selected_pool_candidate_rank_counts": {},
     }
     strategy = str(bcfg.get("gecko_transport_strategy", "sample_first") or "sample_first").strip()
     target_usable_rows = max(int(bcfg.get("gecko_target_usable_rows_per_run", 5) or 5), 1)
@@ -1241,6 +1250,10 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
                 "gecko_rate_limit_cooldown_sec": float(bcfg.get("gecko_rate_limit_cooldown_sec", 15.0) or 15.0),
                 "gecko_ohlcv_404_negative_ttl_sec": float(bcfg.get("gecko_ohlcv_404_negative_ttl_sec", 1800.0) or 1800.0),
                 "gecko_max_pages_per_token": int(bcfg.get("gecko_max_pages_per_token", 12) or 12),
+                "gecko_pool_candidate_limit": int(bcfg.get("gecko_pool_candidate_limit", 3) or 3),
+                "gecko_try_seeded_pair_first": bool(bcfg.get("gecko_try_seeded_pair_first", True)),
+                "gecko_try_alternate_pools_on_ohlcv_404": bool(bcfg.get("gecko_try_alternate_pools_on_ohlcv_404", True)),
+                "gecko_stop_after_provider_family_exhausted": bool(bcfg.get("gecko_stop_after_provider_family_exhausted", True)),
                 "enrich_time_anchor": bool(bcfg.get("enrich_time_anchor", True)),
                 "time_anchor_field_priority": list(_time_anchor_field_priority(config)),
                 "time_anchor_use_block_times": bool(bcfg.get("time_anchor_use_block_times", True)),
@@ -1313,6 +1326,17 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
             )
         if bool(path.get("price_history_fallback_used")):
             summary["fallback_used_count"] += 1
+        if bool(path.get("provider_family_exhausted")):
+            summary["provider_family_exhausted_count"] += 1
+        summary["candidate_pool_attempt_count"] += int(path.get("provider_family_attempt_count") or 0)
+        if not bool(path.get("missing")):
+            summary["candidate_pool_success_count"] += 1
+        rank = path.get("selected_pool_candidate_rank")
+        if rank is not None:
+            rank_key = str(rank)
+            summary["selected_pool_candidate_rank_counts"][rank_key] = (
+                int(summary["selected_pool_candidate_rank_counts"].get(rank_key) or 0) + 1
+            )
         failure_class = str(path.get("provider_failure_class") or "")
         if failure_class:
             summary["failure_class_counts"][failure_class] = int(summary["failure_class_counts"].get(failure_class) or 0) + 1
