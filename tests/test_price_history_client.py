@@ -545,6 +545,53 @@ def test_gecko_resolver_429_sets_cooldown_and_next_call_skips_http():
 
     assert first["provider_failure_class"] == "rate_limited_resolver"
     assert first["provider_failure_retryable"] is True
+    assert first["transport_action"] == "retry_later"
     assert second["cooldown_applied"] is True
+    assert second["transport_action"] == "skip_due_to_cooldown"
     assert second["provider_failure_class"] in {"rate_limited_resolver", "provider_rate_limited_recently"}
     assert client.resolve_calls == [("tok-a", "solana")]
+
+
+def test_transport_decision_complete_path_accept():
+    client = GeckoTerminalClient(
+        resolver_result={"pool_address": "pool-1", "resolver_source": "geckoterminal", "resolver_confidence": "high", "pool_candidates_seen": 1, "pool_resolution_status": "resolved"},
+        ohlcv_payloads=[{"data": {"attributes": {"ohlcv_list": [[1000, 1, 1, 1, 1.0, 10], [1060, 1, 1, 1, 1.1, 11]]}}}],
+    )
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1060, interval_sec=60, limit=2)
+    assert result["transport_action"] == "accept"
+    assert result["usable_for_replay"] is True
+    assert result["usable_for_sampling"] is True
+
+
+def test_transport_decision_partial_usable_is_accept_for_sampling():
+    client = GeckoTerminalClient(
+        resolver_result={"pool_address": "pool-1", "resolver_source": "geckoterminal", "resolver_confidence": "high", "pool_candidates_seen": 1, "pool_resolution_status": "resolved"},
+        ohlcv_payloads=[{"data": {"attributes": {"ohlcv_list": [[1000, 1, 1, 1, 1.0, 10]]}}}],
+    )
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1120, interval_sec=60, limit=2)
+    assert result["price_path_status"] == "partial"
+    assert result["partial_but_usable_row"] is True
+    assert result["transport_action"] == "accept"
+    assert result["usable_for_sampling"] is True
+
+
+def test_transport_decision_resolved_pool_404_is_skip_non_retryable():
+    client = GeckoTerminalClient(
+        resolver_result={"pool_address": "pool-404", "resolver_source": "geckoterminal", "resolver_confidence": "high", "pool_candidates_seen": 1, "pool_resolution_status": "resolved"},
+        ohlcv_payloads=[{"warning": "provider_http_error", "http_status": 404}],
+    )
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1060, interval_sec=60, limit=2)
+    assert result["provider_failure_class"] == "ohlcv_not_available"
+    assert result["provider_failure_retryable"] is False
+    assert result["transport_action"] == "skip_non_retryable"
+
+
+def test_transport_decision_timeout_maps_to_retry_later():
+    client = GeckoTerminalClient(
+        resolver_result={"pool_address": "pool-timeout", "resolver_source": "geckoterminal", "resolver_confidence": "high", "pool_candidates_seen": 1, "pool_resolution_status": "resolved"},
+        ohlcv_payloads=[{"warning": "provider_timeout", "http_status": None}],
+    )
+    result = client.fetch_price_path(token_address="tok", start_ts=1000, end_ts=1060, interval_sec=60, limit=2)
+    assert result["provider_failure_class"] == "provider_timeout"
+    assert result["provider_failure_retryable"] is True
+    assert result["transport_action"] == "retry_later"

@@ -40,6 +40,14 @@ backfill:
   gecko_rate_limit_cooldown_sec: 120
   gecko_ohlcv_404_negative_ttl_sec: 1800
   gecko_max_pages_per_token: 12
+  gecko_transport_strategy: sample_first
+  gecko_target_usable_rows_per_run: 5
+  gecko_max_tokens_per_run: 20
+  gecko_stop_after_target_usable_rows: true
+  gecko_skip_retryable_after_global_cooldown: true
+  gecko_non_retryable_ttl_sec: 21600
+  gecko_request_timeout_sec: 20
+  gecko_max_consecutive_failures: 8
   price_path_stop_after_non_retryable_provider_failure: true
   enrich_time_anchor: true
   time_anchor_field_priority:
