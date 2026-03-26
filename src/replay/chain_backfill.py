@@ -653,6 +653,12 @@ def _attempt_summary(path: dict[str, Any], *, strategy: str, fallback_mode: str 
         "pool_resolver_confidence": path.get("pool_resolver_confidence"),
         "pool_candidates_seen": path.get("pool_candidates_seen"),
         "pool_resolution_status": path.get("pool_resolution_status"),
+        "terminated_on_rate_limit": bool(path.get("terminated_on_rate_limit")),
+        "rate_limit_stage": path.get("rate_limit_stage"),
+        "pool_resolution_http_status": path.get("pool_resolution_http_status"),
+        "ohlcv_http_status": path.get("ohlcv_http_status"),
+        "ohlcv_pages_attempted": int(path.get("ohlcv_pages_attempted") or 0),
+        "ohlcv_pages_succeeded": int(path.get("ohlcv_pages_succeeded") or 0),
         "provider_request_summary": path.get("provider_request_summary") or {},
     }
 
@@ -854,6 +860,9 @@ def _collect_price_paths(
         pool_resolver=provider_config.get("pool_resolver"),
         resolver_cache_ttl_sec=int(provider_config.get("resolver_cache_ttl_sec") or 0),
         max_ohlcv_limit=int(provider_config.get("max_ohlcv_limit") or 1000),
+        gecko_min_request_interval_sec=float(bcfg.get("gecko_min_request_interval_sec", 0.0) or 0.0),
+        gecko_rate_limit_cooldown_sec=float(bcfg.get("gecko_rate_limit_cooldown_sec", 15.0) or 15.0),
+        gecko_max_pages_per_token=int(bcfg.get("gecko_max_pages_per_token", 12) or 12),
     )
 
     attempts = _iter_price_path_attempts(token, pair_address, start_ts, config)
@@ -908,6 +917,8 @@ def _collect_price_paths(
         summary = _attempt_summary(path, strategy=attempt["strategy"], fallback_mode=attempt["strategy"] if attempt["strategy"] != "primary" else None)
         attempt_summaries.append(summary)
         results.append(path)
+        if bool(path.get("terminated_on_rate_limit")):
+            break
 
     best = _choose_best_price_path(results, min_points=min_points)
     if best is None:
@@ -977,6 +988,12 @@ def _collect_price_paths(
             "gap_fill_count": int(enriched.get("gap_fill_count") or 0),
             "observed_row_count": int(enriched.get("observed_row_count") or 0),
             "densified_row_count": int(enriched.get("densified_row_count") or 0),
+            "terminated_on_rate_limit": bool(enriched.get("terminated_on_rate_limit")),
+            "rate_limit_stage": enriched.get("rate_limit_stage"),
+            "pool_resolution_http_status": enriched.get("pool_resolution_http_status"),
+            "ohlcv_http_status": enriched.get("ohlcv_http_status"),
+            "ohlcv_pages_attempted": int(enriched.get("ohlcv_pages_attempted") or 0),
+            "ohlcv_pages_succeeded": int(enriched.get("ohlcv_pages_succeeded") or 0),
         }
     )
     if _price_path_points(enriched) == 0 and int(enriched.get("obs_len") or 0) <= 0:
@@ -994,6 +1011,30 @@ def _time_anchor_cache_fingerprint(cand: dict[str, Any], config: dict[str, Any])
         if value not in (None, "", [], {}):
             payload[key] = value
     return payload
+
+
+def summarize_rate_limited_price_paths(rows: list[dict[str, Any]]) -> dict[str, int]:
+    summary = {
+        "rate_limited_partial_rows": 0,
+        "rate_limited_missing_rows": 0,
+        "resolver_stage_rate_limits": 0,
+        "ohlcv_stage_rate_limits": 0,
+    }
+    for row in rows:
+        for path in row.get("price_paths") or []:
+            if not bool(path.get("terminated_on_rate_limit")):
+                continue
+            status = str(path.get("price_path_status") or "")
+            if status == "partial":
+                summary["rate_limited_partial_rows"] += 1
+            elif status == "missing":
+                summary["rate_limited_missing_rows"] += 1
+            stage = str(path.get("rate_limit_stage") or "unknown")
+            if stage == "resolver":
+                summary["resolver_stage_rate_limits"] += 1
+            elif stage == "ohlcv":
+                summary["ohlcv_stage_rate_limits"] += 1
+    return summary
 
 
 
@@ -1065,6 +1106,9 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
                 "price_path_min_points": int(bcfg.get("price_path_min_points", 2) or 2),
                 "price_path_require_nonempty": bool(bcfg.get("price_path_require_nonempty", True)),
                 "price_path_retry_attempts": int(bcfg.get("price_path_retry_attempts", 3) or 3),
+                "gecko_min_request_interval_sec": float(bcfg.get("gecko_min_request_interval_sec", 0.0) or 0.0),
+                "gecko_rate_limit_cooldown_sec": float(bcfg.get("gecko_rate_limit_cooldown_sec", 15.0) or 15.0),
+                "gecko_max_pages_per_token": int(bcfg.get("gecko_max_pages_per_token", 12) or 12),
                 "enrich_time_anchor": bool(bcfg.get("enrich_time_anchor", True)),
                 "time_anchor_field_priority": list(_time_anchor_field_priority(config)),
                 "time_anchor_use_block_times": bool(bcfg.get("time_anchor_use_block_times", True)),
