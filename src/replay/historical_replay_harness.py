@@ -572,15 +572,27 @@ def _estimate_replay_exit_pnl(current: dict[str, Any], position_ctx: dict[str, A
     }
 
 
-def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_payload: dict[str, Any], regime_decision: str, state: ReplayStateMachine, settings: Any) -> dict[str, Any]:
+def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_payload: dict[str, Any], regime_decision: str, state: ReplayStateMachine, settings: Any | None = None) -> dict[str, Any]:
+    if settings is None:
+        settings = SimpleNamespace()
+
     observations = _collect_observations(token_payload)
     entry_ts = _to_epoch_seconds(entry.get("entry_time"))
     usable_observations = observations
     if entry_ts is not None:
-        usable_observations = [
-            obs for obs in observations
-            if (_to_epoch_seconds(obs.get("timestamp") or obs.get("ts") or obs.get("time")) or 0) >= entry_ts
-        ]
+        filtered_observations = []
+        for obs in observations:
+            obs_ts = _to_epoch_seconds(obs.get("timestamp") or obs.get("ts") or obs.get("time"))
+            if obs_ts is not None:
+                if obs_ts >= entry_ts:
+                    filtered_observations.append(obs)
+                continue
+
+            offset_sec = _safe_float(obs.get("offset_sec"))
+            if offset_sec is not None and offset_sec >= 0:
+                filtered_observations.append(obs)
+
+        usable_observations = filtered_observations
     price_path_missing = not observations
     no_post_entry_points = bool(observations) and not usable_observations
     price_path_truncated = any(bool(path.get("truncated")) for path in (token_payload.get("price_paths") or []))
@@ -959,7 +971,7 @@ def replay_token_lifecycle(
     dry_run: bool,
     config_hash: str,
     historical_input_hash: str,
-    settings: Any,
+    settings: Any | None = None,
     replay_input_origin: str = "historical",
     synthetic_assist_flag: bool = False,
 ) -> dict[str, Any]:
