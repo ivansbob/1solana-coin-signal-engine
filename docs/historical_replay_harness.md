@@ -140,3 +140,26 @@ Replay input assembly can also emit `replay_entry_time` into backfill-ready cand
 
 Price-history bootstrap is now diagnosed separately from real provider/data misses. Backfill rows expose `price_history_provider`, `price_history_provider_status`, `provider_bootstrap_ok`, `provider_config_source`, and `provider_request_summary`, so a row can fail fast on `price_history_provider_unconfigured`, `price_history_provider_invalid`, or `price_history_provider_disabled` without burning the whole staged fallback ladder. Once bootstrap is configured, remaining warnings should describe actual provider/data outcomes such as pool-resolution failures, empty pool OHLCV ranges, rate limits, HTTP failures, parse failures, incomplete windows, or pair/token capability mismatches.
 
+## Gecko sparse OHLCV densification and partial replay usage
+
+When provider is `geckoterminal_pool_ohlcv`, OHLCV can be sparse even with HTTP 200 and a valid pool. The collector now densifies only **internal** gaps between observed provider candles:
+
+- missing internal timestamps are filled at the configured interval;
+- synthetic bar OHLC = previous close, volume = `0`;
+- no bars are created before the first observed candle;
+- no bars are created after the last observed candle.
+
+Materialized rows expose diagnostics/provenance:
+
+- `price_path_origin` (`provider_observed` or `provider_observed_plus_gap_fill`)
+- `gap_fill_applied`
+- `gap_fill_count`
+- `observed_row_count`
+- `densified_row_count`
+
+Replay no longer treats every partial path as hard-missing. A partial historical row is replay-usable when post-entry points exist; it becomes unresolved only when the path is empty or all points are pre-entry only. Summary output now reports:
+
+- `partial_historical_rows_used`
+- `gap_filled_rows_used`
+- `missing_price_path_rows`
+- `partial_but_usable_rows`

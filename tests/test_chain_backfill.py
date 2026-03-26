@@ -406,6 +406,75 @@ def test_collect_price_paths_runs_attempts_after_derived_start_ts(monkeypatch):
     assert TrackingClient.seen_start_ts[0] == 1_773_619_200
 
 
+def test_chain_backfill_preserves_gap_fill_metadata(monkeypatch):
+    class GapFillClient(FakePriceHistoryClient):
+        def fetch_price_path(self, **kwargs):
+            row = super().fetch_price_path(**kwargs)
+            row.update({
+                "gap_fill_applied": True,
+                "gap_fill_count": 2,
+                "observed_row_count": 2,
+                "densified_row_count": 4,
+                "obs_len": 4,
+            })
+            return row
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", GapFillClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "pair_created_at_ts": 1000},
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+    assert result["gap_fill_applied"] is True
+    assert result["gap_fill_count"] == 2
+    assert result["observed_row_count"] == 2
+    assert result["densified_row_count"] == 4
+
+
+def test_chain_backfill_keeps_partial_nonempty_path_as_partial(monkeypatch):
+    class PartialNonEmptyClient(FakePriceHistoryClient):
+        def fetch_price_path(self, **kwargs):
+            row = super().fetch_price_path(**kwargs)
+            row.update({"price_path_status": "partial", "truncated": True, "missing": False})
+            return row
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", PartialNonEmptyClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "pair_created_at_ts": 1000},
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+    assert result["price_path_status"] == "partial"
+    assert result["missing"] is False
+    assert len(result["price_path"]) > 0
+
+
+def test_chain_backfill_marks_missing_only_when_usable_rows_empty(monkeypatch):
+    class EmptyUsableClient(FakePriceHistoryClient):
+        def fetch_price_path(self, **kwargs):
+            row = super().fetch_price_path(**kwargs)
+            row.update(
+                {
+                    "price_path": [],
+                    "obs_len": 0,
+                    "provider_row_count": 3,
+                    "http_status": 200,
+                    "price_path_status": "partial",
+                    "missing": False,
+                }
+            )
+            return row
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", EmptyUsableClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok", "pair_address": "pair", "pair_created_at_ts": 1000},
+        {},
+        _base_config(price_path_window_fallback_multipliers=[], price_interval_fallbacks=[]),
+    )[0]
+    assert result["price_path_status"] == "missing"
+    assert result["missing"] is True
+
+
 class HydrationTrackingRpcClient:
     def __init__(self, *args, **kwargs):
         self.calls = []
@@ -782,6 +851,39 @@ class GeckoMissingRowsClient:
         }
 
 
+class GeckoRateLimitedClient:
+    def __init__(self, *args, **kwargs):
+        self.calls = 0
+
+    def fetch_price_path(self, **kwargs):
+        self.calls += 1
+        return {
+            "token_address": kwargs["token_address"],
+            "pair_address": kwargs.get("pair_address"),
+            "selected_pool_address": "resolved-pool",
+            "pool_address": "resolved-pool",
+            "pool_resolver_source": "geckoterminal",
+            "pool_resolver_confidence": "high",
+            "pool_candidates_seen": 1,
+            "pool_resolution_status": "resolved",
+            "source_provider": "geckoterminal_pool_ohlcv",
+            "requested_start_ts": kwargs.get("start_ts"),
+            "requested_end_ts": kwargs.get("end_ts"),
+            "interval_sec": kwargs.get("interval_sec"),
+            "price_path": [{"timestamp": kwargs.get("start_ts"), "offset_sec": 0, "price": 1.0}] if self.calls == 1 else [],
+            "truncated": True,
+            "missing": False if self.calls == 1 else True,
+            "price_path_status": "partial" if self.calls == 1 else "missing",
+            "warning": "provider_rate_limited",
+            "terminated_on_rate_limit": True,
+            "rate_limit_stage": "ohlcv",
+            "ohlcv_pages_attempted": 1,
+            "ohlcv_pages_succeeded": 0,
+            "pool_resolution_http_status": 200,
+            "ohlcv_http_status": 429,
+        }
+
+
 def test_collect_price_paths_embeds_selected_pool_address_from_provider_result(monkeypatch):
     monkeypatch.setattr(chain_backfill, "PriceHistoryClient", GeckoBackfillClient)
     result = chain_backfill._collect_price_paths(
@@ -803,6 +905,7 @@ def test_collect_price_paths_preserves_pool_resolution_diagnostics_on_missing_ro
     )[0]
 
     assert result["missing"] is True
+    assert result["pair_address"] == "resolved-pool"
     assert result["selected_pool_address"] == "resolved-pool"
     assert result["warning"] == "no_pool_ohlcv_rows"
 
@@ -889,3 +992,29 @@ def test_collect_price_paths_preserves_best_partial_result_for_geckoterminal_pro
 
     assert result["interval_sec"] == 300
     assert len(result["price_path"]) == 3
+
+
+def test_chain_backfill_summary_counts_rate_limited_partials_and_missing():
+    rows = [
+        {
+            "token_address": "tok-1",
+            "price_paths": [
+                {"terminated_on_rate_limit": True, "rate_limit_stage": "ohlcv", "price_path_status": "partial"},
+                {"terminated_on_rate_limit": True, "rate_limit_stage": "resolver", "price_path_status": "missing"},
+            ],
+        },
+        {
+            "token_address": "tok-2",
+            "price_paths": [
+                {"terminated_on_rate_limit": True, "rate_limit_stage": "ohlcv", "price_path_status": "missing"},
+                {"terminated_on_rate_limit": False, "rate_limit_stage": "ohlcv", "price_path_status": "partial"},
+            ],
+        },
+    ]
+
+    summary = chain_backfill.summarize_rate_limited_price_paths(rows)
+
+    assert summary["rate_limited_partial_rows"] == 1
+    assert summary["rate_limited_missing_rows"] == 2
+    assert summary["resolver_stage_rate_limits"] == 1
+    assert summary["ohlcv_stage_rate_limits"] == 2
