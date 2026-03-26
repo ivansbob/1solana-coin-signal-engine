@@ -49,6 +49,12 @@ backfill:
   gecko_request_timeout_sec: 20
   gecko_max_consecutive_failures: 8
   price_path_stop_after_non_retryable_provider_failure: true
+  price_history_router:
+    enabled: true
+    provider_order: [birdeye_ohlcv_v3, geckoterminal_pool_ohlcv]
+    cross_provider_fallback_on_retryable: true
+    accept_partial_usable: true
+    max_routes_per_token: 4
   enrich_time_anchor: true
   time_anchor_field_priority:
     - price_path_start_ts

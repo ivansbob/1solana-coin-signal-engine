@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from collectors.price_history_client import PriceHistoryClient, validate_price_history_provider_config
+from collectors.price_history_router import route_price_history
 from collectors.solana_rpc_client import SolanaRpcClient
 
 
@@ -850,33 +851,57 @@ def _collect_price_paths(
         bcfg.get("price_path_stop_after_non_retryable_provider_failure", True)
     )
     limit = max(int(bcfg.get("price_path_limit", 256) or 256), 1)
-    client = PriceHistoryClient(
-        base_url=provider_config.get("base_url"),
-        api_key=provider_config.get("api_key"),
-        provider=str(provider_name or "price_history"),
-        token_endpoint=provider_config.get("token_endpoint"),
-        pair_endpoint=provider_config.get("pair_endpoint"),
-        chain=provider_config.get("chain"),
-        require_pair_address=bool(provider_config.get("require_pair_address")),
-        allow_pairless_token_lookup=bool(provider_config.get("allow_pairless_token_lookup", True)),
-        provider_status=str(provider_status or "configured"),
-        provider_config_source=provider_config_source,
-        auth_header=str(provider_config.get("auth_header") or "X-API-KEY"),
-        request_kind=str(provider_config.get("request_kind") or "ohlcv"),
-        request_version=provider_config.get("request_version"),
-        currency=str(provider_config.get("currency") or "usd"),
-        token_side=str(provider_config.get("token_side") or "token"),
-        include_empty_intervals=bool(provider_config.get("include_empty_intervals", True)),
-        pool_resolver=provider_config.get("pool_resolver"),
-        resolver_cache_ttl_sec=int(provider_config.get("resolver_cache_ttl_sec") or 0),
-        max_ohlcv_limit=int(provider_config.get("max_ohlcv_limit") or 1000),
-        gecko_min_request_interval_sec=float(bcfg.get("gecko_min_request_interval_sec", 0.0) or 0.0),
-        gecko_rate_limit_cooldown_sec=float(bcfg.get("gecko_rate_limit_cooldown_sec", 15.0) or 15.0),
-        gecko_ohlcv_404_negative_ttl_sec=float(bcfg.get("gecko_ohlcv_404_negative_ttl_sec", 1800.0) or 1800.0),
-        gecko_max_pages_per_token=int(bcfg.get("gecko_max_pages_per_token", 12) or 12),
-        request_timeout_sec=float(bcfg.get("gecko_request_timeout_sec", bcfg.get("request_timeout_sec", 20)) or 20),
-        transport_memory=transport_memory,
-    )
+    def _client_for_provider(provider_cfg: dict[str, Any], provider_status_value: str | None, provider_source: str | None) -> PriceHistoryClient:
+        return PriceHistoryClient(
+            base_url=provider_cfg.get("base_url"),
+            api_key=provider_cfg.get("api_key"),
+            provider=str(provider_cfg.get("price_history_provider") or "price_history"),
+            token_endpoint=provider_cfg.get("token_endpoint"),
+            pair_endpoint=provider_cfg.get("pair_endpoint"),
+            chain=provider_cfg.get("chain"),
+            require_pair_address=bool(provider_cfg.get("require_pair_address")),
+            allow_pairless_token_lookup=bool(provider_cfg.get("allow_pairless_token_lookup", True)),
+            provider_status=str(provider_status_value or "configured"),
+            provider_config_source=provider_source,
+            auth_header=str(provider_cfg.get("auth_header") or "X-API-KEY"),
+            request_kind=str(provider_cfg.get("request_kind") or "ohlcv"),
+            request_version=provider_cfg.get("request_version"),
+            currency=str(provider_cfg.get("currency") or "usd"),
+            token_side=str(provider_cfg.get("token_side") or "token"),
+            include_empty_intervals=bool(provider_cfg.get("include_empty_intervals", True)),
+            pool_resolver=provider_cfg.get("pool_resolver"),
+            resolver_cache_ttl_sec=int(provider_cfg.get("resolver_cache_ttl_sec") or 0),
+            max_ohlcv_limit=int(provider_cfg.get("max_ohlcv_limit") or 1000),
+            gecko_min_request_interval_sec=float(bcfg.get("gecko_min_request_interval_sec", 0.0) or 0.0),
+            gecko_rate_limit_cooldown_sec=float(bcfg.get("gecko_rate_limit_cooldown_sec", 15.0) or 15.0),
+            gecko_ohlcv_404_negative_ttl_sec=float(bcfg.get("gecko_ohlcv_404_negative_ttl_sec", 1800.0) or 1800.0),
+            gecko_max_pages_per_token=int(bcfg.get("gecko_max_pages_per_token", 12) or 12),
+            request_timeout_sec=float(bcfg.get("gecko_request_timeout_sec", bcfg.get("request_timeout_sec", 20)) or 20),
+            transport_memory=transport_memory,
+        )
+
+    router_cfg = dict(bcfg.get("price_history_router") or {})
+    router_enabled = bool(router_cfg.get("enabled", True))
+    route_provider_order = list(router_cfg.get("provider_order") or [])
+    cross_provider_fallback_on_retryable = bool(router_cfg.get("cross_provider_fallback_on_retryable", True))
+    accept_partial_usable = bool(router_cfg.get("accept_partial_usable", True))
+    max_routes_per_token = max(int(router_cfg.get("max_routes_per_token", 4) or 4), 1)
+
+    clients_by_provider: dict[str, PriceHistoryClient] = {}
+
+    def _get_provider_bootstrap(selected_provider: str) -> dict[str, Any]:
+        if selected_provider == str(provider_name or ""):
+            return provider_config
+        config_copy = dict(config)
+        backfill_copy = dict(config_copy.get("backfill") or {})
+        backfill_copy["price_history_provider"] = selected_provider
+        config_copy["backfill"] = backfill_copy
+        providers_copy = dict(config_copy.get("providers") or {})
+        price_history_copy = dict(providers_copy.get("price_history") or {})
+        price_history_copy["provider"] = selected_provider
+        providers_copy["price_history"] = price_history_copy
+        config_copy["providers"] = providers_copy
+        return validate_price_history_provider_config(config_copy)
 
     attempts = _iter_price_path_attempts(token, pair_address, start_ts, config)
     if not provider_config.get("allow_pairless_token_lookup", True):
@@ -913,14 +938,53 @@ def _collect_price_paths(
     attempt_summaries: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
     for attempt in attempts:
-        path = client.fetch_price_path(
-            token_address=token,
-            pair_address=attempt["pair_address"],
-            start_ts=attempt["start_ts"],
-            end_ts=attempt["end_ts"],
-            interval_sec=attempt["interval_sec"],
-            limit=limit,
-        )
+        prior_failure = attempt_summaries[-1] if attempt_summaries else None
+
+        def _fetch_route(route_attempt: dict[str, Any]) -> dict[str, Any]:
+            selected_provider = str(route_attempt.get("provider") or provider_name or "")
+            bootstrap = _get_provider_bootstrap(selected_provider)
+            provider_status_value = bootstrap.get("price_history_provider_status")
+            provider_source = bootstrap.get("provider_config_source")
+            if selected_provider not in clients_by_provider:
+                clients_by_provider[selected_provider] = _client_for_provider(bootstrap, str(provider_status_value or "configured"), provider_source)
+            return clients_by_provider[selected_provider].fetch_price_path(
+                token_address=token,
+                pair_address=route_attempt.get("pair_address"),
+                start_ts=attempt["start_ts"],
+                end_ts=attempt["end_ts"],
+                interval_sec=attempt["interval_sec"],
+                limit=limit,
+            )
+
+        if router_enabled:
+            path = route_price_history(
+                token_context={
+                    "token_address": token,
+                    "pair_address": attempt["pair_address"],
+                },
+                provider_order=route_provider_order,
+                primary_provider=str(provider_name or ""),
+                prior_failure=prior_failure,
+                max_routes_per_token=max_routes_per_token,
+                accept_partial_usable=accept_partial_usable,
+                cross_provider_fallback_on_retryable=cross_provider_fallback_on_retryable,
+                fetch_route=_fetch_route,
+            )
+        else:
+            if str(provider_name or "") not in clients_by_provider:
+                clients_by_provider[str(provider_name or "")] = _client_for_provider(
+                    provider_config,
+                    str(provider_status or "configured"),
+                    provider_config_source,
+                )
+            path = clients_by_provider[str(provider_name or "")].fetch_price_path(
+                token_address=token,
+                pair_address=attempt["pair_address"],
+                start_ts=attempt["start_ts"],
+                end_ts=attempt["end_ts"],
+                interval_sec=attempt["interval_sec"],
+                limit=limit,
+            )
         if attempt.get("pair_address") and not path.get("pool_resolution_status"):
             path["pool_resolution_status"] = "seed_pair_address"
         if attempt.get("pair_address") and not path.get("selected_pool_address"):
@@ -1135,6 +1199,11 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
         "max_tokens_reached": False,
         "max_consecutive_failures_reached": False,
         "completed_input": False,
+        "attempts_by_provider_route_kind": {},
+        "selected_route_provider_counts": {},
+        "failure_class_counts": {},
+        "status_counts": {"complete": 0, "partial_usable": 0, "missing": 0},
+        "fallback_used_count": 0,
     }
     strategy = str(bcfg.get("gecko_transport_strategy", "sample_first") or "sample_first").strip()
     target_usable_rows = max(int(bcfg.get("gecko_target_usable_rows_per_run", 5) or 5), 1)
@@ -1234,6 +1303,26 @@ def build_chain_context(candidates: list[dict[str, Any]], config: dict[str, Any]
         summary["rows_written"] = len(rows)
         path = (price_paths or [{}])[0]
         status = str(path.get("price_path_status") or "missing")
+        status_key = "partial_usable" if bool(path.get("partial_but_usable_row")) else status
+        if status_key in summary["status_counts"]:
+            summary["status_counts"][status_key] += 1
+        selected_route_provider = str(path.get("selected_route_provider") or "")
+        if selected_route_provider:
+            summary["selected_route_provider_counts"][selected_route_provider] = (
+                int(summary["selected_route_provider_counts"].get(selected_route_provider) or 0) + 1
+            )
+        if bool(path.get("price_history_fallback_used")):
+            summary["fallback_used_count"] += 1
+        failure_class = str(path.get("provider_failure_class") or "")
+        if failure_class:
+            summary["failure_class_counts"][failure_class] = int(summary["failure_class_counts"].get(failure_class) or 0) + 1
+        for route_attempt in path.get("price_history_route_attempts") or []:
+            provider_key = str(route_attempt.get("provider") or "unknown")
+            route_kind = str(route_attempt.get("route_kind") or "unknown")
+            bucket_key = f"{provider_key}:{route_kind}"
+            summary["attempts_by_provider_route_kind"][bucket_key] = (
+                int(summary["attempts_by_provider_route_kind"].get(bucket_key) or 0) + 1
+            )
         usable = status == "complete" or bool(path.get("partial_but_usable_row")) or bool(path.get("usable_for_sampling"))
         if status == "complete":
             summary["complete_rows"] += 1

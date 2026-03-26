@@ -770,6 +770,14 @@ class PriceHistoryClient:
         return None, True
 
     def _apply_transport_decision(self, row: dict[str, Any]) -> dict[str, Any]:
+        row.setdefault("price_history_route_selected", None)
+        row.setdefault("price_history_route_attempts", [])
+        row.setdefault("price_history_router_status", None)
+        row.setdefault("price_history_router_warning", None)
+        row.setdefault("price_history_fallback_used", False)
+        row.setdefault("selected_route_provider", None)
+        row.setdefault("selected_route_kind", None)
+        row.setdefault("selected_route_seed_source", None)
         provider_failure_class = str(row.get("provider_failure_class") or "")
         if bool(row.get("cooldown_applied")):
             transport_action = "skip_due_to_cooldown"
