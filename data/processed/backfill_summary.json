@@ -1,0 +1,8 @@
+{
+  "candidates_requested": 100,
+  "rows_written": 100,
+  "status_counts": {
+    "partial": 2,
+    "missing": 98
+  }
+}
