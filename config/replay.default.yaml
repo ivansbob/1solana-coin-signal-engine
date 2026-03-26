@@ -43,6 +43,7 @@ backfill:
   gecko_pool_candidate_limit: 3
   gecko_try_seeded_pair_first: true
   gecko_try_alternate_pools_on_ohlcv_404: true
+  gecko_try_seeded_pair_on_resolver_429: true
   gecko_stop_after_provider_family_exhausted: true
   gecko_transport_strategy: sample_first
   gecko_target_usable_rows_per_run: 5

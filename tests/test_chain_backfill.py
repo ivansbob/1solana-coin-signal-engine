@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from src.replay import chain_backfill
 
 
@@ -1297,6 +1299,45 @@ def test_chain_backfill_propagates_selected_route_metadata(monkeypatch):
     assert isinstance(result["price_history_route_attempts"], list)
 
 
+def test_chain_backfill_preserves_route_metadata_on_missing_rows(monkeypatch):
+    class MissingMetadataClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fetch_price_path(self, **kwargs):
+            return {
+                "token_address": kwargs["token_address"],
+                "pair_address": kwargs.get("pair_address"),
+                "price_path": [],
+                "missing": True,
+                "price_path_status": "missing",
+                "warning": "no_ohlcv_rows",
+                "selected_route_provider": "geckoterminal_pool_ohlcv",
+                "selected_route_kind": "pair",
+                "selected_pool_address": "pool-a",
+                "selected_pool_candidate_rank": 1,
+                "selected_pool_candidate_source": "seeded_pair",
+                "attempted_pool_candidates": [{"pool_address": "pool-a", "candidate_rank": 1}],
+                "attempted_pool_candidate_count": 1,
+                "provider_failure_class": "ohlcv_not_available",
+                "provider_failure_retryable": False,
+                "provider_family_exhausted": True,
+                "pool_resolution_status": "resolved",
+                "transport_action": "skip_non_retryable",
+            }
+
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", MissingMetadataClient)
+    result = chain_backfill._collect_price_paths(
+        {"token_address": "tok-miss", "pair_address": "pair", "pair_created_at_ts": 1000},
+        {},
+        _base_config(price_path_retry_attempts=1),
+    )[0]
+    assert result["selected_route_provider"] in {"birdeye_ohlcv_v3", "geckoterminal_pool_ohlcv"}
+    assert result["selected_pool_candidate_rank"] == 1
+    assert result["attempted_pool_candidate_count"] == 1
+    assert result["provider_failure_class"] == "ohlcv_not_available"
+
+
 def test_chain_backfill_does_not_stop_after_single_pool_404_when_family_not_exhausted(monkeypatch):
     class FamilyAwareClient:
         calls = 0
@@ -1341,6 +1382,10 @@ def test_chain_backfill_does_not_stop_after_single_pool_404_when_family_not_exha
     assert result["missing"] is False
 
 
+def test_chain_backfill_does_not_stop_before_provider_family_exhausted(monkeypatch):
+    test_chain_backfill_does_not_stop_after_single_pool_404_when_family_not_exhausted(monkeypatch)
+
+
 def test_chain_backfill_summary_counts_candidate_pool_attempts(monkeypatch, tmp_path):
     class CandidateCounterClient(FakePriceHistoryClient):
         def fetch_price_path(self, **kwargs):
@@ -1361,6 +1406,67 @@ def test_chain_backfill_summary_counts_candidate_pool_attempts(monkeypatch, tmp_
     summary = (tmp_path / "data/processed/chain_backfill.transport_summary.json").read_text(encoding="utf-8")
     assert '"candidate_pool_attempt_count": 3' in summary
     assert '"provider_family_exhausted_count": 1' in summary
+
+
+def test_chain_backfill_summary_counts_selected_route_provider(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(chain_backfill, "SolanaRpcClient", FakeRpcClient)
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FakePriceHistoryClient)
+    chain_backfill.build_chain_context(
+        [{"token_address": "tok-provider", "pair_address": "pair", "pair_created_at_ts": 1000}],
+        _base_config(price_path_retry_attempts=1),
+        dry_run=False,
+    )
+    summary = json.loads((tmp_path / "data/processed/chain_backfill.transport_summary.json").read_text(encoding="utf-8"))
+    assert summary["selected_route_provider_counts"]
+
+
+def test_chain_backfill_summary_counts_candidate_rank(monkeypatch, tmp_path):
+    class RankClient(FakePriceHistoryClient):
+        def fetch_price_path(self, **kwargs):
+            row = super().fetch_price_path(**kwargs)
+            row["selected_pool_candidate_rank"] = 2
+            return row
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(chain_backfill, "SolanaRpcClient", FakeRpcClient)
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", RankClient)
+    chain_backfill.build_chain_context(
+        [{"token_address": "tok-rank", "pair_address": "pair", "pair_created_at_ts": 1000}],
+        _base_config(price_path_retry_attempts=1),
+        dry_run=False,
+    )
+    summary = json.loads((tmp_path / "data/processed/chain_backfill.transport_summary.json").read_text(encoding="utf-8"))
+    assert summary["selected_pool_candidate_rank_counts"].get("2") == 1
+
+
+def test_chain_backfill_summary_counts_provider_failure_classes(monkeypatch, tmp_path):
+    class FailureClassClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fetch_price_path(self, **kwargs):
+            return {
+                "token_address": kwargs["token_address"],
+                "pair_address": kwargs.get("pair_address"),
+                "price_path": [],
+                "missing": True,
+                "price_path_status": "missing",
+                "provider_failure_class": "provider_timeout",
+                "provider_failure_retryable": True,
+                "transport_action": "retry_later",
+            }
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(chain_backfill, "SolanaRpcClient", FakeRpcClient)
+    monkeypatch.setattr(chain_backfill, "PriceHistoryClient", FailureClassClient)
+    chain_backfill.build_chain_context(
+        [{"token_address": "tok-failure", "pair_address": "pair", "pair_created_at_ts": 1000}],
+        _base_config(price_path_retry_attempts=1),
+        dry_run=False,
+    )
+    summary = json.loads((tmp_path / "data/processed/chain_backfill.transport_summary.json").read_text(encoding="utf-8"))
+    assert summary["provider_failure_class_counts"].get("provider_timeout") == 1
 
 
 def test_chain_backfill_summary_counts_provider_family_exhaustions(monkeypatch, tmp_path):
