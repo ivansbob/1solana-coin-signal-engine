@@ -1,0 +1,10 @@
+{
+  "source_csv": "data/raw/dex_solana_trades_seed.csv",
+  "rows_written": 100,
+  "files_written": [
+    "data/processed/universe.jsonl",
+    "data/processed/entry_candidates.json",
+    "data/processed/scored_tokens.off.json",
+    "data/processed/dune_import_summary.json"
+  ]
+}
