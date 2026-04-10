@@ -20,3 +20,9 @@ data/smoke/historical_replay_summary.json
 data/smoke/historical_replay_summary.md
 data/smoke/historical_trade_feature_matrix.jsonl
 data/smoke/runtime_signal/
+.cache/
+data/cache/
+data/processed/
+data/raw/
+*.jsonl
+.vscode/
