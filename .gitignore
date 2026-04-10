@@ -26,3 +26,12 @@ data/processed/
 data/raw/
 *.jsonl
 .vscode/
+.cache/
+data/cache/
+data/processed/
+data/raw/
+*.jsonl
+.vscode/
+__pycache__/
+*.pyc
+.env
