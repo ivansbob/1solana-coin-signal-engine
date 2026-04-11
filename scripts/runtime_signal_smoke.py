@@ -44,7 +44,8 @@ def _fixture_payload() -> dict:
                 "entry_reason": "smoke_fixture_valid_entry",
                 "entry_flags": ["smoke_fixture"],
                 "regime_blockers": [],
-                "entry_snapshot": {"price_usd": 1.23},
+                "liquidity_usd": 1000000,
+                "entry_snapshot": {"price_usd": 1.23, "liquidity_usd": 1000000},
             },
             {
                 "signal_id": "smoke_degraded_x",
@@ -61,7 +62,8 @@ def _fixture_payload() -> dict:
                 "entry_reason": "smoke_fixture_degraded_x",
                 "entry_flags": ["smoke_fixture", "x_degraded_size_reduced"],
                 "regime_blockers": [],
-                "entry_snapshot": {"price_usd": 0.77},
+                "liquidity_usd": 1000000,
+                "entry_snapshot": {"price_usd": 0.77, "liquidity_usd": 1000000},
                 "partial_evidence_flag": True,
             },
             {

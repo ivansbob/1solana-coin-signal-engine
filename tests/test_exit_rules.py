@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from trading.exit_rules import _pessimistic_stop_threshold, evaluate_hard_exit, evaluate_scalp_exit, evaluate_trend_exit
+from trading.exit_rules import _exit_market_ctx, _pessimistic_stop_threshold, evaluate_hard_exit, evaluate_scalp_exit, evaluate_trend_exit
 
 
 class DummySettings:
@@ -44,6 +44,7 @@ class DummySettings:
     PAPER_PARTIAL_FILL_MIN_RATIO = 0.5
     PAPER_SOL_USD_FALLBACK = 100.0
     EXIT_TREND_POST_PARTIAL1_STOP_PCT = 0.0
+    EXIT_DEGRADED_LIQUIDITY_FALLBACK_MULTIPLIER = 0.1
 
 
 def test_hard_exit_rug_takes_precedence():
@@ -364,3 +365,11 @@ def test_pessimistic_stop_threshold_with_large_slippage_stays_non_positive():
     threshold = _pessimistic_stop_threshold(-10.0, 15.0)
     assert threshold < -10.0
     assert threshold <= 0.0
+
+def test_exit_market_ctx_degrades_entry_liquidity_when_current_liquidity_missing():
+    market_ctx = _exit_market_ctx(
+        {"entry_snapshot": {"liquidity_usd": 50_000, "sol_usd": 100.0}},
+        {"price_usd_now": 1.0},
+        DummySettings(),
+    )
+    assert market_ctx["liquidity_usd"] == 5_000

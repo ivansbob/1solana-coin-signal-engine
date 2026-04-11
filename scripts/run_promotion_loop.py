@@ -243,6 +243,76 @@ def _increment_runtime_health_counters(state: dict[str, Any], signals: list[dict
         if status_text == "truncated" or bool(signal.get("tx_window_truncated")):
             runtime_metrics["tx_window_truncated_count"] += 1
 
+def _rounded_float(value: Any, default: float | None = None) -> float | None:
+    try:
+        if value in (None, ""):
+            return default
+        return round(float(value), 4)
+    except (TypeError, ValueError):
+        return default
+
+
+def _resolved_runtime_entry_sizing(signal: dict[str, Any], sizing: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    canonical_bridge = (
+        str(signal.get("runtime_signal_origin") or "") == "historical_replay"
+        and str(signal.get("runtime_origin_tier") or "") == "canonical"
+        and any(signal.get(field) not in (None, "") for field in ("base_position_pct", "effective_position_pct", "sizing_origin"))
+    )
+    if not canonical_bridge:
+        return sizing, False
+
+    resolved = dict(sizing)
+    recommended_position_pct = _rounded_float(
+        signal.get("recommended_position_pct"),
+        default=_rounded_float(sizing.get("recommended_position_pct"), default=0.0),
+    ) or 0.0
+    base_position_pct = _rounded_float(
+        signal.get("base_position_pct"),
+        default=_rounded_float(sizing.get("base_position_pct"), default=recommended_position_pct),
+    ) or 0.0
+    effective_position_pct = _rounded_float(
+        signal.get("effective_position_pct"),
+        default=base_position_pct,
+    ) or 0.0
+
+    sizing_multiplier = _rounded_float(
+        signal.get("sizing_multiplier"),
+        default=_rounded_float(sizing.get("sizing_multiplier"), default=None),
+    )
+    if sizing_multiplier is None:
+        sizing_multiplier = round(effective_position_pct / recommended_position_pct, 4) if recommended_position_pct > 0 else 0.0
+
+    reason_codes = list(signal.get("sizing_reason_codes") or sizing.get("sizing_reason_codes") or [])
+    if "preserve_precomputed_effective_position_pct" not in reason_codes:
+        reason_codes.append("preserve_precomputed_effective_position_pct")
+
+    resolved.update(
+        {
+            "recommended_position_pct": recommended_position_pct,
+            "base_position_pct": base_position_pct,
+            "effective_position_pct": effective_position_pct,
+            "effective_position_scale": round(effective_position_pct / recommended_position_pct, 4) if recommended_position_pct > 0 else 0.0,
+            "sizing_multiplier": sizing_multiplier,
+            "sizing_origin": signal.get("sizing_origin") or sizing.get("sizing_origin"),
+            "sizing_reason_codes": reason_codes,
+            "sizing_confidence": _rounded_float(
+                signal.get("sizing_confidence"),
+                default=_rounded_float(sizing.get("sizing_confidence"), default=None),
+            ),
+            "sizing_warning": signal.get("sizing_warning") or sizing.get("sizing_warning"),
+            "evidence_quality_score": _rounded_float(
+                signal.get("evidence_quality_score"),
+                default=_rounded_float(sizing.get("evidence_quality_score"), default=None),
+            ),
+        }
+    )
+    for field in ("evidence_conflict_flag", "partial_evidence_flag"):
+        if field in signal and signal.get(field) is not None:
+            resolved[field] = bool(signal.get(field))
+        elif field in sizing:
+            resolved[field] = bool(sizing.get(field))
+    return resolved, True
+
 
 def _build_artifact_manifest(run_dir: Path, *, run_id: str, summary_path: Path, health_path: Path) -> dict[str, Any]:
     signals_path = run_dir / "signals.jsonl"
@@ -754,7 +824,10 @@ def main() -> int:
 
             observe_x_signal(signal, state, cfg)
             guard_results = evaluate_entry_guards(signal, state, cfg)
-            sizing = compute_position_sizing(signal, state, cfg)
+            sizing, preserve_canonical_sizing = _resolved_runtime_entry_sizing(
+                signal,
+                compute_position_sizing(signal, state, cfg),
+            )
             scale = float(sizing.get("effective_position_scale", 0.0))
             runtime_position_pct = float(
                 signal.get("recommended_position_pct")
@@ -762,10 +835,12 @@ def main() -> int:
                 or sizing.get("base_position_pct")
                 or 0.0
             )
+            runtime_base_position_pct = float(sizing.get("base_position_pct") or 0.0) if preserve_canonical_sizing else runtime_position_pct
+            runtime_effective_position_pct = float(sizing.get("effective_position_pct") or 0.0) if preserve_canonical_sizing else runtime_position_pct
             signal.update(
                 {
-                    "base_position_pct": runtime_position_pct,
-                    "effective_position_pct": runtime_position_pct,
+                    "base_position_pct": runtime_base_position_pct,
+                    "effective_position_pct": runtime_effective_position_pct,
                     "sizing_multiplier": sizing.get("sizing_multiplier"),
                     "sizing_reason_codes": sizing.get("sizing_reason_codes", []),
                     "sizing_confidence": sizing.get("sizing_confidence"),
@@ -838,8 +913,8 @@ def main() -> int:
 
             before_open = len(_state_open_positions(state))
             entry_signal = dict(signal)
-            entry_signal["base_position_pct"] = runtime_position_pct
-            entry_signal["effective_position_pct"] = runtime_position_pct
+            entry_signal["base_position_pct"] = runtime_base_position_pct
+            entry_signal["effective_position_pct"] = runtime_effective_position_pct
             state = process_entry_signals([entry_signal], market_states, state, trading_settings)
             opened_position = next(
                 (
@@ -850,8 +925,8 @@ def main() -> int:
                 None,
             )
             if opened_position is not None:
-                opened_position["base_position_pct"] = runtime_position_pct
-                opened_position["effective_position_pct"] = runtime_position_pct
+                opened_position["base_position_pct"] = runtime_base_position_pct
+                opened_position["effective_position_pct"] = runtime_effective_position_pct
             after_open = len(_state_open_positions(state))
             opened_delta = max(after_open - before_open, 0)
             if opened_delta > 0:

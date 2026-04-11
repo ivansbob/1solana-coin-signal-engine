@@ -422,6 +422,18 @@ def _replay_position_size_fraction(position_ctx: dict[str, Any]) -> float:
     return 1.0
 
 
+def _resolve_observed_priority_fee(current: dict[str, Any], position_ctx: dict[str, Any]) -> float:
+    observed_priority_fee_raw = (
+        current.get("priority_fee_avg_first_min")
+        if current.get("priority_fee_avg_first_min") is not None
+        else position_ctx.get("priority_fee_avg_first_min")
+    )
+    observed_priority_fee = _safe_float(observed_priority_fee_raw)
+    if observed_priority_fee is None or observed_priority_fee < 0:
+        return 0.0
+    return observed_priority_fee
+
+
 def _build_replay_exit_friction_inputs(
     current: dict[str, Any],
     position_ctx: dict[str, Any],
@@ -468,7 +480,7 @@ def _build_replay_exit_friction_inputs(
         "sell_pressure": sell_pressure,
         "cluster_sell_concentration_120s": cluster_sell_concentration,
         "congestion_multiplier": congestion_multiplier,
-        "priority_fee_avg_first_min": _safe_float(current.get("priority_fee_avg_first_min")) or 1.0,
+        "priority_fee_avg_first_min": _resolve_observed_priority_fee(current, position_ctx),
         "sol_usd": _safe_float(current.get("sol_usd") or position_ctx.get("sol_usd")),
         "dex_id": current.get("dex_id") or position_ctx.get("dex_id"),
         "pair_type": current.get("pair_type") or position_ctx.get("pair_type"),

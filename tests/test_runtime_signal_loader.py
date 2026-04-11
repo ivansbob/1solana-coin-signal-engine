@@ -154,3 +154,41 @@ def test_loader_prefers_canonical_trade_feature_matrix_over_entry_candidates(tmp
     assert batch["selected_origin"] == "historical_replay"
     assert batch["origin_tier"] == "canonical"
     assert batch["signals"][0]["token_address"] == "SoCanonical111"
+
+
+def test_loader_preserves_canonical_sizing_fields_from_trade_feature_matrix(tmp_path):
+    processed = tmp_path / "processed"
+    append_jsonl(
+        processed / "trade_feature_matrix.jsonl",
+        {
+            "schema_version": "trade_feature_matrix.v1",
+            "token_address": "SoCanonicalSizing111",
+            "signal_ts": "2026-03-20T00:00:00+00:00",
+            "entry_decision": "SCALP",
+            "recommended_position_pct": 0.75,
+            "base_position_pct": 0.5,
+            "effective_position_pct": 0.3,
+            "sizing_multiplier": 0.6,
+            "sizing_origin": "historical_replay_canonical",
+            "sizing_reason_codes": ["historical_replay_canonical_bridge"],
+            "sizing_confidence": 0.86,
+            "evidence_quality_score": 0.78,
+            "evidence_conflict_flag": False,
+            "partial_evidence_flag": False,
+        },
+    )
+
+    batch = load_latest_runtime_signal_batch(processed, stale_after_sec=None)
+
+    assert batch["selected_origin"] == "historical_replay"
+    assert batch["origin_tier"] == "canonical"
+    row = batch["signals"][0]
+    assert row["base_position_pct"] == 0.5
+    assert row["effective_position_pct"] == 0.3
+    assert row["sizing_multiplier"] == 0.6
+    assert row["sizing_origin"] == "historical_replay_canonical"
+    assert row["sizing_reason_codes"] == ["historical_replay_canonical_bridge"]
+    assert row["sizing_confidence"] == 0.86
+    assert row["evidence_quality_score"] == 0.78
+    assert row["evidence_conflict_flag"] is False
+    assert row["partial_evidence_flag"] is False

@@ -59,11 +59,19 @@ Replay must remain historical-only:
 python scripts/historical_replay_smoke.py
 ```
 
+Paper sanity must also prove the canonical replay-to-paper bridge:
+
+```bash
+python scripts/paper_trader_smoke.py
+```
+
 Checks:
 
 - runtime consumes real artifact inputs by default
 - replay does not fabricate a synthetic truth path when historical artifacts are present
 - runtime/replay provenance remains visible in emitted artifacts
+- paper sanity starts from canonical `trade_feature_matrix.jsonl` and reaches paper execution through the runtime loader bridge
+- fallback-only `entry_candidates.json` is not sufficient operational proof for readiness
 
 ## 4. Analyzer evidence-quality review
 
