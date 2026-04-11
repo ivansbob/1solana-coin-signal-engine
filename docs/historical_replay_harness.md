@@ -127,3 +127,41 @@ Calibration candidates are now applied as real replay setting overrides. The har
 ## Lifecycle artifact contract
 
 `trades.jsonl` must be analyzer-usable. Preferred output is a canonical buy/sell ledger. When replay writes a flattened historical lifecycle row instead, the analyzer must still treat that row as a first-class closed trade lifecycle rather than falling back to `positions.json` as the hidden primary source of truth. `positions.json` remains a support / fallback artifact, not the only way to recover closed trades.
+
+## Seed price-path backfill fallbacks
+
+Replay seed backfill now uses staged price-path recovery instead of a single OHLCV fetch. The collector first tries the requested launch window and interval, then can widen the window, retry on coarser intervals, retry without a pair binding, and shift the start timestamp backward by a prelaunch buffer. The selected result keeps compact provenance in `attempt_count`, `attempts`, `resolved_via_fallback`, and `fallback_mode` so missing paths remain diagnosable instead of collapsing into a generic provider miss.
+
+Backfill now also applies a dedicated price-history router before concluding a token row is missing. The router tries seeded pair/pool and token routes across configured providers in deterministic order and propagates route-attempt provenance (`price_history_route_attempts`, `price_history_route_selected`, `selected_route_provider`, `selected_route_kind`). This improves failover but does **not** mask missing data; rows remain explicitly missing unless a provider returns `complete` data or a real `partial_but_usable_row=true`.
+
+When the configured provider is `geckoterminal_pool_ohlcv`, price-path materialization now includes canonical pool resolution as part of the staged ladder. Replay candidates may still carry a seed `pair_address`, but that address is treated as a hint while the emitted row separately records `selected_pool_address`, `pool_resolver_source`, `pool_resolver_confidence`, `pool_candidates_seen`, and `pool_resolution_status`. That means a replay row can preserve both the original seed hint and the actual provider pool used to fetch OHLCV.
+
+Before those OHLCV attempts begin, the backfill layer now resolves a seed time anchor in stages. It prefers lifecycle-aware candidate fields in a deterministic order: `price_path_start_ts`, `replay_entry_time`, `entry_time`, `opened_at`, and then broader discovery-style timestamps. Only after those higher-preference anchors are absent does it fall back to cached `block_times`, embedded `signatures[].blockTime`, and finally controlled signature hydration that resolves real `blockTime` values from string-only signatures without inventing timestamps. Successful and missing rows now expose both the winning anchor and the discarded lower-priority candidates through `price_path_time_source`, `price_path_time_derived`, `price_path_anchor_field`, `time_anchor_resolution_status`, `time_anchor_attempts`, `time_anchor_candidates`, `time_anchor_discarded_candidates`, `time_anchor_preference_applied`, `signature_hydration_attempted`, `signature_hydration_count`, and `missing_required_fields`.
+
+Replay input assembly can also emit `replay_entry_time` into backfill-ready candidates when the historical harness already reconstructed an entry timestamp from signals, trades, or positions. That keeps the same real time anchor available to both lifecycle replay and upstream price-path population instead of letting sparse seed fixtures stop at `attempt_count = 0` before the first provider fetch.
+
+Price-history bootstrap is now diagnosed separately from real provider/data misses. Backfill rows expose `price_history_provider`, `price_history_provider_status`, `provider_bootstrap_ok`, `provider_config_source`, and `provider_request_summary`, so a row can fail fast on `price_history_provider_unconfigured`, `price_history_provider_invalid`, or `price_history_provider_disabled` without burning the whole staged fallback ladder. Once bootstrap is configured, remaining warnings should describe actual provider/data outcomes such as pool-resolution failures, empty pool OHLCV ranges, rate limits, HTTP failures, parse failures, incomplete windows, or pair/token capability mismatches.
+
+## Gecko sparse OHLCV densification and partial replay usage
+
+When provider is `geckoterminal_pool_ohlcv`, OHLCV can be sparse even with HTTP 200 and a valid pool. The collector now densifies only **internal** gaps between observed provider candles:
+
+- missing internal timestamps are filled at the configured interval;
+- synthetic bar OHLC = previous close, volume = `0`;
+- no bars are created before the first observed candle;
+- no bars are created after the last observed candle.
+
+Materialized rows expose diagnostics/provenance:
+
+- `price_path_origin` (`provider_observed` or `provider_observed_plus_gap_fill`)
+- `gap_fill_applied`
+- `gap_fill_count`
+- `observed_row_count`
+- `densified_row_count`
+
+Replay no longer treats every partial path as hard-missing. A partial historical row is replay-usable when post-entry points exist; it becomes unresolved only when the path is empty or all points are pre-entry only. Summary output now reports:
+
+- `partial_historical_rows_used`
+- `gap_filled_rows_used`
+- `missing_price_path_rows`
+- `partial_but_usable_rows`

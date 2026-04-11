@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -201,6 +202,28 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+def _safe_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_epoch_seconds(value: Any) -> int | None:
+    numeric = _safe_int(value)
+    if numeric is not None:
+        return numeric
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
+
+
 def _safe_wallet_features(*sources: dict[str, Any]) -> dict[str, Any]:
     features = dict(_DEFAULT_WALLET_FEATURES)
     for source in sources:
@@ -364,9 +387,10 @@ def _status_from_missing(missing_evidence: list[str]) -> str:
 
 def _entry_decision(context: dict[str, Any], regime: dict[str, Any], token_payload: dict[str, Any]) -> tuple[str, list[str]]:
     explicit = str(context.get("entry_decision") or context.get("decision") or "").strip().upper()
-    reasons: list[str] = []
     if explicit in {"ENTER", "PAPER_ENTER", "BUY", "OPEN"}:
         return "ENTER", ["historical_entry_artifact"]
+    if explicit in {"SCALP", "TREND"}:
+        return "ENTER", [f"historical_regime_{explicit.lower()}"]
     if explicit in {"IGNORE", "SKIP", "BLOCKED", "REJECT"}:
         return "IGNORE", [f"historical_decision_{explicit.lower()}"]
     if token_payload.get("trades") or token_payload.get("positions"):
@@ -397,8 +421,38 @@ def _collect_observations(token_payload: dict[str, Any]) -> list[dict[str, Any]]
         observations = price_path.get("price_path") or []
         if isinstance(observations, list):
             rows.extend(obs for obs in observations if isinstance(obs, dict))
-    rows.sort(key=lambda row: float(row.get("offset_sec", row.get("elapsed_sec", row.get("t", 0))) or 0.0))
+    rows.sort(
+        key=lambda row: (
+            _to_epoch_seconds(row.get("timestamp") or row.get("ts") or row.get("time")) or 0,
+            float(row.get("offset_sec", row.get("elapsed_sec", row.get("t", 0))) or 0.0),
+        )
+    )
     return rows
+
+
+def _resolve_entry_price_from_historical_observation(entry: dict[str, Any], token_payload: dict[str, Any]) -> dict[str, Any]:
+    if entry.get("entry_price") is not None:
+        return entry
+
+    entry_ts = _to_epoch_seconds(entry.get("entry_time"))
+    if entry_ts is None:
+        return entry
+
+    for observation in _collect_observations(token_payload):
+        observation_ts = _to_epoch_seconds(observation.get("timestamp") or observation.get("ts") or observation.get("time"))
+        if observation_ts is None or observation_ts < entry_ts:
+            continue
+        observation_price = _safe_float(observation.get("price") if "price" in observation else observation.get("price_usd"))
+        if observation_price is None:
+            continue
+        return {
+            **entry,
+            "entry_price": observation_price,
+            "entry_price_source": "historical_price_path",
+            "entry_price_timestamp": observation.get("timestamp") or observation.get("ts") or observation.get("time") or observation_ts,
+        }
+
+    return entry
 
 
 def _augment_current_context(base: dict[str, Any], observation: dict[str, Any], entry_price: float | None) -> dict[str, Any]:
@@ -518,10 +572,32 @@ def _estimate_replay_exit_pnl(current: dict[str, Any], position_ctx: dict[str, A
     }
 
 
-def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_payload: dict[str, Any], regime_decision: str, state: ReplayStateMachine, settings: Any) -> dict[str, Any]:
+def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_payload: dict[str, Any], regime_decision: str, state: ReplayStateMachine, settings: Any | None = None) -> dict[str, Any]:
+    if settings is None:
+        settings = SimpleNamespace()
+
     observations = _collect_observations(token_payload)
+    entry_ts = _to_epoch_seconds(entry.get("entry_time"))
+    usable_observations = observations
+    if entry_ts is not None:
+        filtered_observations = []
+        for obs in observations:
+            obs_ts = _to_epoch_seconds(obs.get("timestamp") or obs.get("ts") or obs.get("time"))
+            if obs_ts is not None:
+                if obs_ts >= entry_ts:
+                    filtered_observations.append(obs)
+                continue
+
+            offset_sec = _safe_float(obs.get("offset_sec"))
+            if offset_sec is not None and offset_sec >= 0:
+                filtered_observations.append(obs)
+
+        usable_observations = filtered_observations
     price_path_missing = not observations
+    no_post_entry_points = bool(observations) and not usable_observations
     price_path_truncated = any(bool(path.get("truncated")) for path in (token_payload.get("price_paths") or []))
+    partial_historical_path = any(str(path.get("price_path_status") or "") == "partial" for path in (token_payload.get("price_paths") or []))
+    gap_fill_applied = any(bool(path.get("gap_fill_applied")) for path in (token_payload.get("price_paths") or []))
 
     if price_path_missing:
         return {
@@ -532,6 +608,25 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
             "exit_reason_final": None,
             "exit_flags": [],
             "exit_warnings": ["missing_price_path"],
+            "partial_historical_row_used": False,
+            "gap_filled_row_used": False,
+            "partial_but_usable_row": False,
+            "missing_price_path_row": True,
+        }
+
+    if no_post_entry_points:
+        return {
+            "resolution_status": "unresolved",
+            "replay_data_status": "historical_partial",
+            "warning": "no_post_entry_points",
+            "exit_decision": None,
+            "exit_reason_final": None,
+            "exit_flags": [],
+            "exit_warnings": ["missing_price_path"],
+            "partial_historical_row_used": False,
+            "gap_filled_row_used": False,
+            "partial_but_usable_row": False,
+            "missing_price_path_row": True,
         }
 
     position_ctx = {
@@ -555,7 +650,7 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
     last_current: dict[str, Any] | None = None
     partial_exit_events: list[str] = []
 
-    for observation in observations:
+    for observation in usable_observations:
         current = _augment_current_context(base_context, observation, entry.get("entry_price"))
         current = _mask_future_window_metrics(current, float(current.get("hold_sec") or 0.0))
         last_current = current
@@ -573,6 +668,10 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
                 "exit_price": current.get("price"),
                 "exit_time": observation.get("timestamp") or observation.get("ts") or entry.get("entry_time"),
                 "hold_sec": current.get("hold_sec"),
+                "partial_historical_row_used": partial_historical_path,
+                "gap_filled_row_used": gap_fill_applied,
+                "partial_but_usable_row": partial_historical_path,
+                "missing_price_path_row": False,
                 **pnl_payload,
             }
 
@@ -596,6 +695,10 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
                 "exit_price": current.get("price"),
                 "exit_time": observation.get("timestamp") or observation.get("ts") or entry.get("entry_time"),
                 "hold_sec": current.get("hold_sec"),
+                "partial_historical_row_used": partial_historical_path,
+                "gap_filled_row_used": gap_fill_applied,
+                "partial_but_usable_row": partial_historical_path,
+                "missing_price_path_row": False,
                 **pnl_payload,
             }
 
@@ -611,6 +714,10 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
             "exit_flags": partial_exit_events,
             "exit_warnings": ["truncated_price_path"],
             "hold_sec": (last_current or {}).get("hold_sec"),
+            "partial_historical_row_used": partial_historical_path,
+            "gap_filled_row_used": gap_fill_applied,
+            "partial_but_usable_row": partial_historical_path,
+            "missing_price_path_row": False,
             **pnl_payload,
         }
 
@@ -626,6 +733,10 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
             "exit_flags": partial_exit_events,
             "exit_warnings": ["partial_exit_without_full_exit"],
             "hold_sec": (last_current or {}).get("hold_sec"),
+            "partial_historical_row_used": partial_historical_path,
+            "gap_filled_row_used": gap_fill_applied,
+            "partial_but_usable_row": partial_historical_path,
+            "missing_price_path_row": False,
             **pnl_payload,
         }
 
@@ -640,6 +751,10 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
         "exit_flags": [],
         "exit_warnings": ["historical_exit_not_resolved"],
         "hold_sec": (last_current or {}).get("hold_sec"),
+        "partial_historical_row_used": partial_historical_path,
+        "gap_filled_row_used": gap_fill_applied,
+        "partial_but_usable_row": partial_historical_path,
+        "missing_price_path_row": False,
         **pnl_payload,
     }
 
@@ -829,6 +944,25 @@ def _replay_token_sort_key(item: tuple[str, dict[str, Any]]) -> tuple[int, int, 
         str(token),
     )
 
+def _opened_position_contract(*, trade: dict[str, Any] | None, trade_feature_row: dict[str, Any] | None, replay_resolution_status: str, replay_data_status: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    if trade is None or trade_feature_row is None:
+        raise AssertionError("opened_position_must_emit_trade_and_matrix")
+
+    warnings = list(trade.get("exit_warnings") or [])
+    if replay_resolution_status == "unresolved" and "missing_price_path" in warnings:
+        replay_data_status = "historical_partial"
+    elif replay_resolution_status == "partial" and any(flag in warnings for flag in {"truncated_price_path", "partial_exit_without_full_exit"}):
+        replay_data_status = "historical_partial"
+    elif replay_resolution_status == "unresolved" and "historical_exit_not_resolved" in warnings:
+        replay_data_status = "historical_partial"
+
+    trade["replay_resolution_status"] = replay_resolution_status
+    trade["replay_data_status"] = replay_data_status
+    trade_feature_row["replay_resolution_status"] = replay_resolution_status
+    trade_feature_row["replay_data_status"] = replay_data_status
+    return trade, trade_feature_row
+
+
 def replay_token_lifecycle(
     *,
     token_payload: dict[str, Any],
@@ -837,7 +971,7 @@ def replay_token_lifecycle(
     dry_run: bool,
     config_hash: str,
     historical_input_hash: str,
-    settings: Any,
+    settings: Any | None = None,
     replay_input_origin: str = "historical",
     synthetic_assist_flag: bool = False,
 ) -> dict[str, Any]:
@@ -958,12 +1092,14 @@ def replay_token_lifecycle(
         }
 
     entry = _extract_entry_context(base_context, token_payload)
+    entry = _resolve_entry_price_from_historical_observation(entry, token_payload)
     if entry.get("entry_price") is None:
         missing_evidence.append("entry_price")
     state.open_position(entry_time=entry["entry_time"], entry_price=entry.get("entry_price"))
     log_info("replay_position_opened", run_id=run_id, token_address=token_address, entry_time=entry["entry_time"])
 
-    exit_payload = _resolve_exit(base_context, entry, token_payload, str(regime.get("regime_decision") or "SCALP").upper(), state, settings)
+    effective_exit_regime = str(historical_regime_decision or regime.get("regime_decision") or "SCALP").upper()
+    exit_payload = _resolve_exit(base_context, entry, token_payload, effective_exit_regime, state, settings)
     if exit_payload.get("warning"):
         log_warning("replay_unresolved", run_id=run_id, token_address=token_address, warning=exit_payload["warning"])
     elif exit_payload.get("exit_decision") == "FULL_EXIT":
@@ -992,6 +1128,8 @@ def replay_token_lifecycle(
         "entry_ts": entry["entry_time"],
         "entry_time": entry["entry_time"],
         "entry_price": entry.get("entry_price"),
+        "entry_price_source": entry.get("entry_price_source"),
+        "entry_price_timestamp": entry.get("entry_price_timestamp"),
         "exit_ts": exit_payload.get("exit_time"),
         "exit_time": exit_payload.get("exit_time"),
         "exit_price": exit_payload.get("exit_price"),
@@ -1028,6 +1166,8 @@ def replay_token_lifecycle(
         "closed_at": exit_payload.get("exit_time"),
         "warnings": [*missing_evidence, *(exit_payload.get("exit_warnings") or [])],
         "entry_price": entry.get("entry_price"),
+        "entry_price_source": entry.get("entry_price_source"),
+        "entry_price_timestamp": entry.get("entry_price_timestamp"),
         "exit_price": exit_payload.get("exit_price"),
         "gross_pnl_pct": exit_payload.get("gross_pnl_pct"),
         "net_pnl_pct": exit_payload.get("net_pnl_pct"),
@@ -1048,6 +1188,12 @@ def replay_token_lifecycle(
         replay_input_origin=replay_input_origin,
         synthetic_assist_flag=synthetic_assist_flag,
     )
+    trade, trade_feature_row = _opened_position_contract(
+        trade=trade,
+        trade_feature_row=trade_feature_row,
+        replay_resolution_status=replay_resolution_status,
+        replay_data_status=replay_data_status,
+    )
 
     return {
         "signal": signal,
@@ -1059,6 +1205,10 @@ def replay_token_lifecycle(
         "events": state.snapshot()["events"],
         "resolution_status": replay_resolution_status,
         "replay_data_status": replay_data_status,
+        "partial_historical_row_used": bool(exit_payload.get("partial_historical_row_used")),
+        "gap_filled_row_used": bool(exit_payload.get("gap_filled_row_used")),
+        "partial_but_usable_row": bool(exit_payload.get("partial_but_usable_row")),
+        "missing_price_path_row": bool(exit_payload.get("missing_price_path_row")),
     }
 
 
@@ -1237,7 +1387,14 @@ def run_historical_replay(
     historical_rows = sum(1 for result in results if result["replay_data_status"] == "historical")
     partial_rows = sum(1 for result in results if result["replay_data_status"] == "historical_partial")
     unresolved_rows = sum(1 for result in results if result["resolution_status"] in {"unresolved", "partial"})
+    partial_historical_rows_used = sum(1 for result in results if bool(result.get("partial_historical_row_used")))
+    gap_filled_rows_used = sum(1 for result in results if bool(result.get("gap_filled_row_used")))
+    missing_price_path_rows = sum(1 for result in results if bool(result.get("missing_price_path_row")))
+    partial_but_usable_rows = sum(1 for result in results if bool(result.get("partial_but_usable_row")))
     ignored_rows = sum(1 for result in results if result["resolution_status"] == "ignored")
+    opened_positions = sum(1 for result in results if (result.get("position") or {}).get("status") in {"open", "closed"})
+    unresolved_open_positions = sum(1 for result in results if (result.get("position") or {}).get("status") == "open" and result["resolution_status"] == "unresolved")
+    partial_open_positions = sum(1 for result in results if (result.get("position") or {}).get("status") == "open" and result["resolution_status"] == "partial")
     synthetic_used = synthetic_assist_flag
     if not replay_mode == "synthetic_smoke" and partial_rows:
         replay_mode = "historical_partial"
@@ -1265,7 +1422,14 @@ def run_historical_replay(
         f"- historical_rows_used: {historical_rows}",
         f"- partial_rows: {partial_rows}",
         f"- unresolved_rows: {unresolved_rows}",
+        f"- partial_historical_rows_used: {partial_historical_rows_used}",
+        f"- gap_filled_rows_used: {gap_filled_rows_used}",
+        f"- missing_price_path_rows: {missing_price_path_rows}",
+        f"- partial_but_usable_rows: {partial_but_usable_rows}",
         f"- ignored_rows: {ignored_rows}",
+        f"- opened_positions: {opened_positions}",
+        f"- unresolved_open_positions: {unresolved_open_positions}",
+        f"- partial_open_positions: {partial_open_positions}",
         f"- synthetic_fallback_used: {synthetic_used}",
         f"- signals: {len(signals)}",
         f"- trades: {len(trades)}",
@@ -1292,7 +1456,14 @@ def run_historical_replay(
         "historical_rows_used": historical_rows,
         "partial_rows": partial_rows,
         "unresolved_rows": unresolved_rows,
+        "partial_historical_rows_used": partial_historical_rows_used,
+        "gap_filled_rows_used": gap_filled_rows_used,
+        "missing_price_path_rows": missing_price_path_rows,
+        "partial_but_usable_rows": partial_but_usable_rows,
         "ignored_rows": ignored_rows,
+        "opened_positions": opened_positions,
+        "unresolved_open_positions": unresolved_open_positions,
+        "partial_open_positions": partial_open_positions,
         "synthetic_fallback_used": synthetic_used,
         "signals": len(signals),
         "trades": len(trades),
