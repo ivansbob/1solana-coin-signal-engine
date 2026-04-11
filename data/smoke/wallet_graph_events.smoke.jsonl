@@ -1,2 +1,12 @@
 {"event": "wallet_graph_build_started", "fixture": "organic_multi_cluster", "status": "ok"}
 {"cluster_count": 3, "event": "wallet_graph_completed", "fixture": "organic_multi_cluster", "status": "ok"}
+{"event": "wallet_graph_build_started", "fixture": "organic_multi_cluster", "status": "ok"}
+{"cluster_count": 3, "event": "wallet_graph_completed", "fixture": "organic_multi_cluster", "status": "ok"}
+{"event": "wallet_graph_build_started", "fixture": "organic_multi_cluster", "status": "ok"}
+{"cluster_count": 3, "event": "wallet_graph_completed", "fixture": "organic_multi_cluster", "status": "ok"}
+{"event": "wallet_graph_build_started", "fixture": "organic_multi_cluster", "status": "ok"}
+{"cluster_count": 3, "event": "wallet_graph_completed", "fixture": "organic_multi_cluster", "status": "ok"}
+{"event": "wallet_graph_build_started", "fixture": "organic_multi_cluster", "status": "ok"}
+{"cluster_count": 3, "event": "wallet_graph_completed", "fixture": "organic_multi_cluster", "status": "ok"}
+{"event": "wallet_graph_build_started", "fixture": "organic_multi_cluster", "status": "ok"}
+{"cluster_count": 3, "event": "wallet_graph_completed", "fixture": "organic_multi_cluster", "status": "ok"}

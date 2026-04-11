@@ -74,7 +74,7 @@
     "contract_version": "wallet_clusters.v1",
     "derivation_mode": "graph_connected_components",
     "fixture": "organic_multi_cluster",
-    "generated_at": "2026-04-11T00:17:53Z",
+    "generated_at": "2026-04-11T00:52:40Z",
     "smoke": true,
     "source_contract_version": "wallet_graph.v1"
   },
