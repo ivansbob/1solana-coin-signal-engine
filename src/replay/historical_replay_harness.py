@@ -14,6 +14,7 @@ from src.replay.replay_input_loader import load_replay_inputs
 from src.replay.wallet_mode_rescore import rescore_replay_inputs
 from src.replay.replay_state_machine import ReplayStateMachine
 from trading.exit_rules import evaluate_hard_exit, evaluate_scalp_exit, evaluate_trend_exit
+from trading.friction_model import compute_fill_realism, compute_priority_fee_sol
 from trading.regime_rules import decide_regime
 from utils.bundle_contract_fields import (
     BUNDLE_PROVENANCE_FIELDS,
@@ -90,6 +91,24 @@ _DEFAULT_REPLAY_SETTINGS = {
     "EXIT_RETRY_MANIPULATION_HARD": 5.0,
     "EXIT_CREATOR_CLUSTER_RISK_HARD": 0.75,
     "EXIT_LINKAGE_RISK_HARD": 0.78,
+    "PAPER_STARTING_CAPITAL_SOL": 0.1,
+    "PAPER_DEFAULT_SLIPPAGE_BPS": 150.0,
+    "PAPER_MAX_SLIPPAGE_BPS": 1200.0,
+    "PAPER_SLIPPAGE_LIQUIDITY_SENSITIVITY": 1.0,
+    "PAPER_PRIORITY_FEE_BASE_SOL": 0.00002,
+    "PAPER_SOL_USD_FALLBACK": 100.0,
+    "PAPER_PARTIAL_FILL_ALLOWED": True,
+    "PAPER_PARTIAL_FILL_MIN_RATIO": 0.5,
+    "FRICTION_MODEL_MODE": "amm_approx",
+    "PAPER_AMM_IMPACT_EXPONENT": 1.35,
+    "FRICTION_THIN_DEPTH_DEX_IDS": "meteora,orca_whirlpool,raydium_clmm",
+    "FRICTION_THIN_DEPTH_PAIR_TYPES": "clmm,dlmm,concentrated",
+    "FRICTION_THIN_DEPTH_LIQUIDITY_MULTIPLIER": 0.65,
+    "FRICTION_THIN_DEPTH_STRESS_SELL_MULTIPLIER": 0.70,
+    "FRICTION_CATASTROPHIC_LIQUIDITY_RATIO": 1.15,
+    "FRICTION_CATASTROPHIC_FILLED_FRACTION": 0.15,
+    "FRICTION_CATASTROPHIC_SLIPPAGE_BPS": 2500,
+    "CONGESTION_STRESS_ENABLED": True,
 }
 _DEFAULT_WALLET_FEATURES = {
     "smart_wallet_hits": 0,
@@ -111,17 +130,31 @@ _POINT_IN_TIME_REQUIRED_WINDOWS_SEC = {
     "x_author_velocity_5m": 300,
 }
 
+_DISCOVERY_LAG_MATRIX_FIELDS = [
+    "discovery_lag_penalty_applied",
+    "discovery_lag_blocked_trend",
+    "discovery_lag_size_multiplier",
+    "discovery_lag_score_penalty",
+]
+_TX_LAKE_MATRIX_FIELDS = [
+    "tx_batch_status",
+    "tx_batch_freshness",
+    "tx_fetch_mode",
+    "tx_batch_warning",
+]
+_REPLAY_FRICTION_FALLBACK_LIQUIDITY_USD = 20_000.0
+
 _TRADE_FEATURE_MATRIX_FIELDS = [
     "run_id", "ts", "token_address", "pair_address", "symbol", "config_hash", "decision", "entry_decision",
     "regime_decision", "regime_confidence", "regime_reason_flags", "regime_blockers", "expected_hold_class",
     "entry_confidence", "recommended_position_pct", "base_position_pct", "effective_position_pct", "sizing_multiplier",
-    "sizing_reason_codes", "sizing_confidence", "sizing_origin", "sizing_warning", "evidence_quality_score",
+    "sizing_reason_codes", "sizing_confidence", "sizing_origin", "sizing_warning", *_DISCOVERY_LAG_MATRIX_FIELDS, "evidence_quality_score",
     "evidence_conflict_flag", "partial_evidence_flag", "final_score_pre_wallet", "final_score", "onchain_core", "early_signal_bonus",
     "x_validation_bonus", "rug_penalty", "spam_penalty", "confidence_adjustment", "wallet_adjustment",
     "bundle_aggression_bonus", "organic_multi_cluster_bonus", "single_cluster_penalty", "creator_cluster_penalty",
     "cluster_dev_link_penalty", "shared_funder_penalty", "bundle_sell_heavy_penalty", "retry_manipulation_penalty",
     "age_sec", "age_minutes", "liquidity_usd", "buy_pressure_entry", "volume_velocity_entry", "holder_growth_5m_entry",
-    "smart_wallet_hits_entry", *SHORT_HORIZON_SIGNAL_FIELDS, *CONTINUATION_METADATA_FIELDS, "x_status",
+    "smart_wallet_hits_entry", *SHORT_HORIZON_SIGNAL_FIELDS, *CONTINUATION_METADATA_FIELDS, *_TX_LAKE_MATRIX_FIELDS, "x_status",
     "x_validation_score_entry", "x_validation_delta_entry", "bundle_count_first_60s", "bundle_size_value",
     "unique_wallets_per_bundle_avg", "bundle_timing_from_liquidity_add_min", "bundle_success_rate",
     "bundle_composition_dominant", "bundle_tip_efficiency", "bundle_failure_retry_pattern",
@@ -378,11 +411,102 @@ def _augment_current_context(base: dict[str, Any], observation: dict[str, Any], 
     if entry_price and price is not None and entry_price > 0:
         current["pnl_pct"] = ((price - entry_price) / entry_price) * 100.0
         current.setdefault("gross_pnl_pct", current["pnl_pct"])
-        current.setdefault("net_pnl_pct", current["pnl_pct"])
     return current
 
 
-def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_payload: dict[str, Any], regime_decision: str, state: ReplayStateMachine) -> dict[str, Any]:
+def _replay_position_size_fraction(position_ctx: dict[str, Any]) -> float:
+    for field in ("effective_position_pct", "recommended_position_pct", "base_position_pct"):
+        value = _safe_float(position_ctx.get(field))
+        if value is not None and value >= 0:
+            return value
+    return 1.0
+
+
+def _build_replay_exit_friction_inputs(
+    current: dict[str, Any],
+    position_ctx: dict[str, Any],
+    settings: Any,
+) -> tuple[dict[str, Any], dict[str, Any], float]:
+    size_fraction = _replay_position_size_fraction(position_ctx)
+    capital_sol = _safe_float(getattr(settings, "PAPER_STARTING_CAPITAL_SOL", 0.1))
+    if capital_sol is None or capital_sol <= 0:
+        capital_sol = 0.1
+    requested_notional_sol = max(capital_sol * max(size_fraction, 0.0), 0.000001)
+
+    liquidity_usd = _safe_float(current.get("liquidity_usd") or position_ctx.get("liquidity_usd"))
+    if liquidity_usd is None or liquidity_usd <= 0:
+        liquidity_usd = _REPLAY_FRICTION_FALLBACK_LIQUIDITY_USD
+
+    volume_velocity = _safe_float(
+        current.get("volume_velocity_now")
+        or current.get("volume_velocity")
+        or position_ctx.get("volume_velocity")
+    ) or 0.0
+    cluster_sell_concentration = _safe_float(
+        current.get("cluster_sell_concentration_120s")
+        or position_ctx.get("cluster_sell_concentration_120s")
+    ) or 0.0
+    sell_pressure = _safe_float(current.get("sell_pressure") or current.get("sell_pressure_ratio"))
+    if sell_pressure is None:
+        sell_pressure = cluster_sell_concentration
+    congestion_multiplier = _safe_float(current.get("congestion_multiplier") or current.get("bundle_failure_retry_pattern")) or 1.0
+    congestion_multiplier = max(congestion_multiplier, 1.0)
+
+    order_ctx = {
+        "side": "sell",
+        "exit_decision": current.get("exit_decision") or position_ctx.get("exit_decision"),
+        "exit_reason": current.get("exit_reason") or current.get("exit_reason_final") or position_ctx.get("exit_reason"),
+        "exit_flags": current.get("exit_flags") or position_ctx.get("exit_flags") or [],
+        "exit_fraction": 1.0,
+        "requested_notional_sol": requested_notional_sol,
+        "entry_confidence": _safe_float(position_ctx.get("entry_confidence") or current.get("entry_confidence")) or 1.0,
+    }
+    market_ctx = {
+        "liquidity_usd": liquidity_usd,
+        "volume_velocity": volume_velocity,
+        "volatility": volume_velocity,
+        "sell_pressure": sell_pressure,
+        "cluster_sell_concentration_120s": cluster_sell_concentration,
+        "congestion_multiplier": congestion_multiplier,
+        "priority_fee_avg_first_min": _safe_float(current.get("priority_fee_avg_first_min")) or 1.0,
+        "sol_usd": _safe_float(current.get("sol_usd") or position_ctx.get("sol_usd")),
+        "dex_id": current.get("dex_id") or position_ctx.get("dex_id"),
+        "pair_type": current.get("pair_type") or position_ctx.get("pair_type"),
+        "transfer_fee_detected": bool(current.get("transfer_fee_detected") or position_ctx.get("transfer_fee_detected")),
+        "transfer_fee_bps": _safe_float(current.get("transfer_fee_bps") or position_ctx.get("transfer_fee_bps")) or 0.0,
+    }
+    return order_ctx, market_ctx, requested_notional_sol
+
+
+def _estimate_replay_exit_pnl(current: dict[str, Any], position_ctx: dict[str, Any], settings: Any) -> dict[str, Any]:
+    gross_pnl_pct = _safe_float(current.get("gross_pnl_pct"))
+    if gross_pnl_pct is None:
+        gross_pnl_pct = _safe_float(current.get("pnl_pct"))
+    if gross_pnl_pct is None:
+        return {"gross_pnl_pct": None, "net_pnl_pct": None}
+
+    order_ctx, market_ctx, requested_notional_sol = _build_replay_exit_friction_inputs(current, position_ctx, settings)
+    try:
+        fill_realism = compute_fill_realism(order_ctx, market_ctx, settings)
+        slippage_impact_pct = max(float(fill_realism.get("effective_slippage_bps") or 0.0) / 100.0, 0.0)
+        priority_fee_sol = max(float(compute_priority_fee_sol(order_ctx, market_ctx, settings) or 0.0), 0.0)
+    except Exception:
+        default_slippage_bps = _safe_float(getattr(settings, "PAPER_DEFAULT_SLIPPAGE_BPS", 150.0)) or 150.0
+        slippage_impact_pct = max(default_slippage_bps / 100.0, 0.0)
+        priority_fee_sol = max(float(getattr(settings, "PAPER_PRIORITY_FEE_BASE_SOL", 0.00002) or 0.00002), 0.0)
+
+    fee_impact_pct = 0.0
+    if requested_notional_sol > 0:
+        fee_impact_pct = max((priority_fee_sol / requested_notional_sol) * 100.0, 0.0)
+
+    net_pnl_pct = gross_pnl_pct - slippage_impact_pct - fee_impact_pct
+    return {
+        "gross_pnl_pct": round(gross_pnl_pct, 6),
+        "net_pnl_pct": round(net_pnl_pct, 6),
+    }
+
+
+def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_payload: dict[str, Any], regime_decision: str, state: ReplayStateMachine, settings: Any) -> dict[str, Any]:
     observations = _collect_observations(token_payload)
     price_path_missing = not observations
     price_path_truncated = any(bool(path.get("truncated")) for path in (token_payload.get("price_paths") or []))
@@ -403,6 +527,18 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
         "entry_price": entry.get("entry_price"),
         "opened_at": entry.get("entry_time"),
         "partials_taken": [],
+        "effective_position_pct": base_context.get("effective_position_pct"),
+        "recommended_position_pct": base_context.get("recommended_position_pct"),
+        "base_position_pct": base_context.get("base_position_pct"),
+        "entry_confidence": base_context.get("entry_confidence"),
+        "liquidity_usd": base_context.get("liquidity_usd"),
+        "volume_velocity": base_context.get("volume_velocity"),
+        "cluster_sell_concentration_120s": base_context.get("cluster_sell_concentration_120s"),
+        "transfer_fee_detected": base_context.get("transfer_fee_detected"),
+        "transfer_fee_bps": base_context.get("transfer_fee_bps"),
+        "dex_id": base_context.get("dex_id"),
+        "pair_type": base_context.get("pair_type"),
+        "sol_usd": base_context.get("sol_usd"),
     }
     last_current: dict[str, Any] | None = None
     partial_exit_events: list[str] = []
@@ -411,9 +547,10 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
         current = _augment_current_context(base_context, observation, entry.get("entry_price"))
         current = _mask_future_window_metrics(current, float(current.get("hold_sec") or 0.0))
         last_current = current
-        hard = evaluate_hard_exit(position_ctx, current, _build_settings({}, "off"))
+        hard = evaluate_hard_exit(position_ctx, current, settings)
         if hard["exit_decision"] == "FULL_EXIT":
             state.full_exit(exit_reason=hard["exit_reason"], hold_sec=current.get("hold_sec"), pnl_pct=current.get("pnl_pct"))
+            pnl_payload = _estimate_replay_exit_pnl({**current, "exit_decision": hard["exit_decision"], "exit_reason": hard["exit_reason"], "exit_flags": hard["exit_flags"]}, position_ctx, settings)
             return {
                 "resolution_status": "resolved",
                 "replay_data_status": "historical",
@@ -424,12 +561,11 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
                 "exit_price": current.get("price"),
                 "exit_time": observation.get("timestamp") or observation.get("ts") or entry.get("entry_time"),
                 "hold_sec": current.get("hold_sec"),
-                "gross_pnl_pct": current.get("pnl_pct"),
-                "net_pnl_pct": current.get("pnl_pct"),
+                **pnl_payload,
             }
 
         evaluator = evaluate_trend_exit if regime_decision == "TREND" else evaluate_scalp_exit
-        decision = evaluator(position_ctx, current, _build_settings({}, "off"))
+        decision = evaluator(position_ctx, current, settings)
         if decision["exit_decision"] == "PARTIAL_EXIT":
             position_ctx.setdefault("partials_taken", []).append(f"partial_{len(position_ctx['partials_taken']) + 1}")
             partial_exit_events.append(decision["exit_reason"])
@@ -437,6 +573,7 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
             continue
         if decision["exit_decision"] == "FULL_EXIT":
             state.full_exit(exit_reason=decision["exit_reason"], hold_sec=current.get("hold_sec"), pnl_pct=current.get("pnl_pct"))
+            pnl_payload = _estimate_replay_exit_pnl({**current, "exit_decision": decision["exit_decision"], "exit_reason": decision["exit_reason"], "exit_flags": decision["exit_flags"]}, position_ctx, settings)
             return {
                 "resolution_status": "resolved",
                 "replay_data_status": "historical" if not price_path_truncated else "historical_partial",
@@ -447,12 +584,12 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
                 "exit_price": current.get("price"),
                 "exit_time": observation.get("timestamp") or observation.get("ts") or entry.get("entry_time"),
                 "hold_sec": current.get("hold_sec"),
-                "gross_pnl_pct": current.get("pnl_pct"),
-                "net_pnl_pct": current.get("pnl_pct"),
+                **pnl_payload,
             }
 
     if price_path_truncated:
         state.unresolved(warning="truncated_price_path")
+        pnl_payload = _estimate_replay_exit_pnl({**(last_current or {}), "exit_flags": partial_exit_events}, position_ctx, settings)
         return {
             "resolution_status": "partial",
             "replay_data_status": "historical_partial",
@@ -462,12 +599,12 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
             "exit_flags": partial_exit_events,
             "exit_warnings": ["truncated_price_path"],
             "hold_sec": (last_current or {}).get("hold_sec"),
-            "gross_pnl_pct": (last_current or {}).get("pnl_pct"),
-            "net_pnl_pct": (last_current or {}).get("pnl_pct"),
+            **pnl_payload,
         }
 
     if partial_exit_events:
         state.unresolved(warning="partial_exit_without_full_exit")
+        pnl_payload = _estimate_replay_exit_pnl({**(last_current or {}), "exit_decision": "PARTIAL_EXIT", "exit_reason": partial_exit_events[-1], "exit_flags": partial_exit_events}, position_ctx, settings)
         return {
             "resolution_status": "partial",
             "replay_data_status": "historical_partial",
@@ -477,11 +614,11 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
             "exit_flags": partial_exit_events,
             "exit_warnings": ["partial_exit_without_full_exit"],
             "hold_sec": (last_current or {}).get("hold_sec"),
-            "gross_pnl_pct": (last_current or {}).get("pnl_pct"),
-            "net_pnl_pct": (last_current or {}).get("pnl_pct"),
+            **pnl_payload,
         }
 
     state.unresolved(warning="historical_exit_not_resolved")
+    pnl_payload = _estimate_replay_exit_pnl(last_current or {}, position_ctx, settings)
     return {
         "resolution_status": "unresolved",
         "replay_data_status": "historical_partial",
@@ -491,8 +628,7 @@ def _resolve_exit(base_context: dict[str, Any], entry: dict[str, Any], token_pay
         "exit_flags": [],
         "exit_warnings": ["historical_exit_not_resolved"],
         "hold_sec": (last_current or {}).get("hold_sec"),
-        "gross_pnl_pct": (last_current or {}).get("pnl_pct"),
-        "net_pnl_pct": (last_current or {}).get("pnl_pct"),
+        **pnl_payload,
     }
 
 
@@ -574,6 +710,10 @@ def _build_trade_feature_row(
         "sizing_confidence": _first_present(sources, "sizing_confidence"),
         "sizing_origin": _first_present(sources, "sizing_origin"),
         "sizing_warning": _first_present(sources, "sizing_warning"),
+        "discovery_lag_penalty_applied": _first_present(sources, "discovery_lag_penalty_applied"),
+        "discovery_lag_blocked_trend": _first_present(sources, "discovery_lag_blocked_trend"),
+        "discovery_lag_size_multiplier": _first_present(sources, "discovery_lag_size_multiplier"),
+        "discovery_lag_score_penalty": _first_present(sources, "discovery_lag_score_penalty"),
         "evidence_quality_score": _first_present(sources, "evidence_quality_score"),
         "evidence_conflict_flag": _first_present(sources, "evidence_conflict_flag"),
         "partial_evidence_flag": _first_present(sources, "partial_evidence_flag"),
@@ -605,6 +745,10 @@ def _build_trade_feature_row(
         "volume_velocity_entry": _first_present(sources, "volume_velocity_entry", "volume_velocity"),
         "holder_growth_5m_entry": _first_present(sources, "holder_growth_5m_entry", "holder_growth_5m"),
         "smart_wallet_hits_entry": _first_present(sources, "smart_wallet_hits_entry", "smart_wallet_hits"),
+        "tx_batch_status": _first_present(sources, "tx_batch_status"),
+        "tx_batch_freshness": _first_present(sources, "tx_batch_freshness"),
+        "tx_fetch_mode": _first_present(sources, "tx_fetch_mode"),
+        "tx_batch_warning": _first_present(sources, "tx_batch_warning"),
         "x_status": _first_present(sources, "x_status"),
         "x_validation_score_entry": _first_present(sources, "x_validation_score_entry", "x_validation_score"),
         "x_validation_delta_entry": _first_present(sources, "x_validation_delta_entry", "x_validation_delta"),
@@ -807,7 +951,7 @@ def replay_token_lifecycle(
     state.open_position(entry_time=entry["entry_time"], entry_price=entry.get("entry_price"))
     log_info("replay_position_opened", run_id=run_id, token_address=token_address, entry_time=entry["entry_time"])
 
-    exit_payload = _resolve_exit(base_context, entry, token_payload, str(regime.get("regime_decision") or "SCALP").upper(), state)
+    exit_payload = _resolve_exit(base_context, entry, token_payload, str(regime.get("regime_decision") or "SCALP").upper(), state, settings)
     if exit_payload.get("warning"):
         log_warning("replay_unresolved", run_id=run_id, token_address=token_address, warning=exit_payload["warning"])
     elif exit_payload.get("exit_decision") == "FULL_EXIT":

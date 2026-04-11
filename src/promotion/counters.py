@@ -41,20 +41,3 @@ def update_loss_streak(state: dict, pnl_pct: float) -> dict:
     else:
         state["consecutive_losses"] = 0
     return state
-
-
-def apply_closed_trade_outcome(
-    state: dict,
-    *,
-    pnl_pct: float,
-    realized_pnl_sol: float,
-    starting_capital_sol: float | None = None,
-) -> dict:
-    update_trade_counters(
-        state,
-        pnl_pct=pnl_pct,
-        realized_pnl_sol=realized_pnl_sol,
-        starting_capital_sol=starting_capital_sol,
-    )
-    update_loss_streak(state, pnl_pct)
-    return state

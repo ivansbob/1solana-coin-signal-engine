@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from trading.paper_trader import process_entry_signals, process_exit_signals
-from trading.position_book import ensure_state, release_pending_settlements
+from trading.position_book import ensure_state
 
 
 class S:
@@ -153,7 +153,7 @@ def test_exit_proceeds_are_not_reusable_in_same_cycle(tmp_path: Path):
     assert state["portfolio"]["free_capital_sol"] <= 0.0
 
 
-def test_pending_settlement_releases_on_next_loop_cycle_without_new_entries(tmp_path: Path):
+def test_pending_settlement_releases_on_next_entry_cycle(tmp_path: Path):
     state = {"paths": {"signals": tmp_path / "signals.jsonl", "trades": tmp_path / "trades.jsonl"}}
     ensure_state(state, S())
 
@@ -173,23 +173,6 @@ def test_pending_settlement_releases_on_next_loop_cycle_without_new_entries(tmp_
 
     assert state["portfolio"]["pending_settlement_count"] == 1
 
-    before_free_capital = state["portfolio"]["free_capital_sol"]
-    state["settlement_cycle_seq"] = int(state.get("settlement_cycle_seq") or 0) + 1
-    state["portfolio"]["settlement_cycle_seq"] = state["settlement_cycle_seq"]
-    released = release_pending_settlements(state)
-
-    assert released["released_count"] == 1
-    assert released["released_sol"] > 0.0
-    assert state["portfolio"]["pending_settlement_count"] == 0
-    assert state["portfolio"]["free_capital_sol"] > before_free_capital
-
-
-def test_process_entry_signals_does_not_advance_settlement_cycle(tmp_path: Path):
-    state = {"paths": {"signals": tmp_path / "signals.jsonl", "trades": tmp_path / "trades.jsonl"}}
-    ensure_state(state, S())
-    state["settlement_cycle_seq"] = 7
-    state["portfolio"]["settlement_cycle_seq"] = 7
-
     process_entry_signals(
         [{"token_address": "SoCap3", "symbol": "CAP3", "entry_decision": "SCALP", "entry_confidence": 0.8, "recommended_position_pct": 0.5, "base_position_pct": 0.5, "effective_position_pct": 0.5, "sizing_multiplier": 1.0, "sizing_origin": "evidence_weighted", "sizing_reason_codes": ["base"], "sizing_confidence": 0.8, "evidence_quality_score": 0.8, "evidence_conflict_flag": False, "partial_evidence_flag": False, "entry_reason": "ok", "entry_snapshot": {}, "contract_version": "paper_trader_v1"}],
         [{"token_address": "SoCap3", "price_usd": 1.0, "liquidity_usd": 1_000_000}],
@@ -197,5 +180,5 @@ def test_process_entry_signals_does_not_advance_settlement_cycle(tmp_path: Path)
         S(),
     )
 
-    assert state["settlement_cycle_seq"] == 7
-    assert state["portfolio"]["settlement_cycle_seq"] == 7
+    assert state["portfolio"]["pending_settlement_count"] == 0
+    assert any(pos.get("token_address") == "SoCap3" for pos in state["positions"])

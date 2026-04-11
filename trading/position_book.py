@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from trading.pnl_engine import compute_exit_pnl, compute_unrealized_pnl
+from trading.pnl_engine import (
+    compute_closed_fraction_of_position,
+    compute_exit_pnl,
+    compute_unrealized_pnl,
+)
 from utils.clock import utc_now_iso
 from utils.wallet_family_contract_fields import copy_wallet_family_contract_fields
 
@@ -31,17 +35,6 @@ def _position_sizing_fields(signal_ctx: dict[str, Any]) -> dict[str, Any]:
         "evidence_scores",
     )
     return {field: signal_ctx.get(field) for field in fields if field in signal_ctx}
-
-
-def _substantial_partial_fill(fill_ctx: dict[str, Any], *, threshold: float = 0.90) -> bool:
-    fill_ratio = float(fill_ctx.get("fill_ratio") or 0.0)
-    if fill_ratio > 0.0:
-        return fill_ratio >= threshold
-    requested_cost_basis = float(fill_ctx.get("requested_cost_basis_sol") or fill_ctx.get("requested_notional_sol") or 0.0)
-    filled_cost_basis = float(fill_ctx.get("filled_cost_basis_sol") or 0.0)
-    if requested_cost_basis > 0.0 and filled_cost_basis > 0.0:
-        return (filled_cost_basis / requested_cost_basis) >= threshold
-    return False
 
 
 def _refresh_pending_settlement_metrics(state: dict[str, Any]) -> None:
@@ -205,11 +198,10 @@ def apply_partial_exit(position_ctx: dict[str, Any], fill_ctx: dict[str, Any], s
 
     exit_flags = {str(item) for item in (fill_ctx.get("exit_flags") or [])}
     partials_taken = list(position_ctx.get("partials_taken") or [])
-    substantial_partial_fill = _substantial_partial_fill(fill_ctx)
-    if substantial_partial_fill and "partial_take_profit_1" in exit_flags and "partial_1" not in partials_taken:
+    if "partial_take_profit_1" in exit_flags and "partial_1" not in partials_taken:
         partials_taken.append("partial_1")
         position_ctx["partial_1_taken"] = True
-    if substantial_partial_fill and "partial_take_profit_2" in exit_flags and "partial_2" not in partials_taken:
+    if "partial_take_profit_2" in exit_flags and "partial_2" not in partials_taken:
         partials_taken.append("partial_2")
         position_ctx["partial_2_taken"] = True
     position_ctx["partials_taken"] = partials_taken

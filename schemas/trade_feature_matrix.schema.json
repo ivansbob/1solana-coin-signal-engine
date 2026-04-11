@@ -1084,7 +1084,55 @@
         "null"
       ]
     },
-    "reason_flags": null
+    "reason_flags": null,
+    "discovery_lag_penalty_applied": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "discovery_lag_blocked_trend": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "discovery_lag_size_multiplier": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "discovery_lag_score_penalty": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "tx_batch_status": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tx_batch_freshness": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tx_fetch_mode": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tx_batch_warning": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
   },
   "additionalProperties": false
 }

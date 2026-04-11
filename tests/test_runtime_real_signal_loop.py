@@ -53,8 +53,7 @@ def test_runtime_loop_opens_paper_position_from_real_signal(tmp_path):
                     "cluster_concentration_ratio": 0.24,
                     "x_validation_score": 82,
                     "entry_reason": "fixture_valid_real_entry",
-                    "liquidity_usd": 1000000,
-                    "entry_snapshot": {"price_usd": 1.0, "liquidity_usd": 1000000},
+                    "entry_snapshot": {"price_usd": 1.0},
                 }
             ]
         },
@@ -194,8 +193,7 @@ def test_runtime_loop_resume_can_close_open_position_from_refreshed_current_stat
                     "regime_confidence": 0.9,
                     "entry_confidence": 0.88,
                     "recommended_position_pct": 0.4,
-                    "liquidity_usd": 1000000,
-                    "entry_snapshot": {"price_usd": 1.0, "liquidity_usd": 1000000, "x_validation_score": 82, "buy_pressure": 0.8, "volume_velocity": 4.0},
+                    "entry_snapshot": {"price_usd": 1.0, "x_validation_score": 82, "buy_pressure": 0.8, "volume_velocity": 4.0},
                 }
             ]
         },
@@ -239,13 +237,11 @@ def test_runtime_loop_resume_can_close_open_position_from_refreshed_current_stat
                     "regime_confidence": 0.9,
                     "entry_confidence": 0.88,
                     "recommended_position_pct": 0.4,
-                    "liquidity_usd": 1000000,
-                    "liquidity_usd_now": 1000000,
                     "price_usd_now": 0.82,
                     "buy_pressure_now": 0.72,
                     "volume_velocity_now": 3.6,
                     "x_validation_score_now": 80,
-                    "entry_snapshot": {"price_usd": 0.82, "liquidity_usd": 1000000, "x_validation_score": 80, "buy_pressure": 0.72, "volume_velocity": 3.6},
+                    "entry_snapshot": {"price_usd": 0.82, "x_validation_score": 80, "buy_pressure": 0.72, "volume_velocity": 3.6},
                 }
             ]
         },
@@ -353,108 +349,3 @@ def test_runtime_loop_reports_runtime_market_cache_size(tmp_path):
     assert "runtime_market_cache_size" in summary
     assert summary["runtime_market_cache_size"] >= 0
     assert "runtime_market_cache_pinned_count" in summary
-
-
-def test_runtime_loop_updates_counters_from_full_exit_outcome(tmp_path):
-    processed = tmp_path / "processed"
-    write_json(
-        processed / "entry_candidates.json",
-        {
-            "tokens": [
-                {
-                    "signal_id": "counter_open_1",
-                    "token_address": "SoCounter111",
-                    "pair_address": "PairCounter111",
-                    "entry_decision": "SCALP",
-                    "regime": "SCALP",
-                    "x_status": "healthy",
-                    "signal_ts": "2026-03-20T00:00:00+00:00",
-                    "regime_confidence": 0.9,
-                    "entry_confidence": 0.88,
-                    "recommended_position_pct": 0.4,
-                    "entry_snapshot": {"price_usd": 1.0, "liquidity_usd": 1_000_000, "buy_pressure": 0.8, "volume_velocity": 4.0, "x_validation_score": 82, "x_status": "healthy"},
-                }
-            ]
-        },
-    )
-    config_path = _config(tmp_path, mode="expanded_paper")
-    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
-    config_payload["paper"] = {"PAPER_PARTIAL_FILL_ALLOWED": False}
-    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
-    run_id = "runtime_exit_counters"
-
-    first = subprocess.run(
-        [
-            sys.executable,
-            "scripts/run_promotion_loop.py",
-            "--config",
-            str(config_path),
-            "--mode",
-            "expanded_paper",
-            "--run-id",
-            run_id,
-            "--max-loops",
-            "1",
-            "--signals-dir",
-            str(processed),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert first.returncode == 0, first.stderr
-
-    write_json(processed / "entry_candidates.json", {"tokens": []})
-    write_json(
-        processed / "market_states.json",
-        {
-            "market_states": [
-                {
-                    "token_address": "SoCounter111",
-                    "price_usd": 0.7,
-                    "price_usd_now": 0.7,
-                    "liquidity_usd": 1_000_000,
-                    "liquidity_usd_now": 1_000_000,
-                    "buy_pressure": 0.4,
-                    "buy_pressure_now": 0.4,
-                    "volume_velocity": 0.0,
-                    "volume_velocity_now": 0.0,
-                    "x_validation_score": 70,
-                    "x_validation_score_now": 70,
-                    "x_status": "healthy",
-                    "x_status_now": "healthy",
-                    "signal_ts": "2026-03-20T00:10:00+00:00",
-                }
-            ]
-        },
-    )
-
-    second = subprocess.run(
-        [
-            sys.executable,
-            "scripts/run_promotion_loop.py",
-            "--config",
-            str(config_path),
-            "--mode",
-            "expanded_paper",
-            "--run-id",
-            run_id,
-            "--resume",
-            "--max-loops",
-            "1",
-            "--signals-dir",
-            str(processed),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert second.returncode == 0, second.stderr
-
-    summary = read_json(tmp_path / "runs" / run_id / "daily_summary.json", default={})
-
-    assert summary["trades_today"] == 1
-    assert summary["open_positions"] == 0
-    assert summary["realized_pnl_sol_today"] < 0
-    assert summary["pnl_pct_today"] < 0
-    assert summary["consecutive_losses"] == 1

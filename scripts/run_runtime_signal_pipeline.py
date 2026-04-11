@@ -23,7 +23,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rug-path")
     parser.add_argument("--scored-path")
     parser.add_argument("--entry-path")
-    parser.add_argument("--market-states-path")
     return parser
 
 
@@ -39,7 +38,6 @@ def main() -> int:
             "rug": args.rug_path,
             "scored": args.scored_path,
             "entry": args.entry_path,
-            "market_states": args.market_states_path,
         }.items()
         if value
     }

@@ -52,13 +52,7 @@ def test_runtime_signal_pipeline_writes_canonical_artifacts(tmp_path):
     assert saved["pipeline_status"] == "ok"
     assert saved["stage_statuses"]["discovery"] == "skipped"
     assert saved["stage_statuses"]["entry"] == "skipped"
-    assert saved["stage_statuses"]["market_states"] == "ok"
     assert saved["artifact_paths"]["entry"].endswith("entry.override.json")
-    assert saved["artifact_paths"]["market_states"].endswith("market_states.json")
-
-    market_states = read_json(Path(saved["artifact_paths"]["market_states"]), default={})
-    assert market_states["contract_version"] == "runtime_market_states_v1"
-    assert market_states["market_states"][0]["token_address"] == "So111"
 
 
 def test_runtime_signal_pipeline_marks_missing_stage_input_honestly(tmp_path):

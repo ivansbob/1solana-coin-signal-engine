@@ -24,7 +24,7 @@ from src.promotion.cooldowns import (
     register_degraded_x_entry_opened,
     resolve_degraded_x_guard,
 )
-from src.promotion.counters import apply_closed_trade_outcome, roll_daily_state_if_needed
+from src.promotion.counters import roll_daily_state_if_needed, update_trade_counters
 from src.promotion.guards import compute_position_sizing, evaluate_entry_guards, should_block_entry
 from src.promotion.io import append_jsonl, materialize_jsonl, write_json
 from src.promotion.kill_switch import is_kill_switch_active
@@ -45,7 +45,7 @@ from src.promotion.state_machine import apply_transition
 from src.promotion.types import utc_now_iso
 from trading.exit_logic import decide_exits
 from trading.paper_trader import process_entry_signals, process_exit_signals, run_mark_to_market
-from trading.position_book import ensure_state, release_pending_settlements
+from trading.position_book import ensure_state
 
 
 _DEFAULT_TRADING_SETTINGS = {
@@ -358,126 +358,6 @@ def _build_market_states(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(seen.values())
 
 
-def _extract_market_state_rows(payload: Any) -> list[dict[str, Any]]:
-    if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-    if isinstance(payload, dict):
-        for key in ("market_states", "tokens", "items", "rows", "signals"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
-    return []
-
-
-def _load_runtime_market_states(signals_dir: str | Path) -> tuple[list[dict[str, Any]], str | None, str | None]:
-    path = Path(signals_dir) / "market_states.json"
-    if not path.exists():
-        return [], None, None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
-        return [], str(path), "market_states_unreadable"
-    rows = _extract_market_state_rows(payload)
-    normalized: list[dict[str, Any]] = []
-    for row in rows:
-        token = str(row.get("token_address") or row.get("mint") or "").strip()
-        if not token:
-            continue
-        normalized.append({**dict(row), "token_address": token, "_runtime_market_source": "market_states_artifact"})
-    return normalized, str(path), None
-
-
-def _merge_signal_and_market_states(signals: list[dict[str, Any]], runtime_market_states: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
-    for market in _build_market_states(signals):
-        token = str(market.get("token_address") or "").strip()
-        if not token:
-            continue
-        merged[token] = {**dict(market), "_runtime_market_source": "signal_derived"}
-    for market in runtime_market_states:
-        token = str(market.get("token_address") or "").strip()
-        if not token:
-            continue
-        merged[token] = {**merged.get(token, {}), **dict(market), "token_address": token, "_runtime_market_source": "market_states_artifact"}
-    return list(merged.values())
-
-
-def _snapshot_open_position_state(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    snapshot: dict[str, dict[str, Any]] = {}
-    for position in _state_open_positions(state):
-        position_id = str(position.get("position_id") or "").strip()
-        if not position_id:
-            continue
-        snapshot[position_id] = {
-            "position_id": position_id,
-            "token_address": position.get("token_address"),
-            "is_open": bool(position.get("is_open")),
-            "realized_pnl_sol": float(position.get("realized_pnl_sol") or 0.0),
-        }
-    return snapshot
-
-
-def _record_closed_trade_outcomes(
-    state: dict[str, Any],
-    *,
-    before_open_positions: dict[str, dict[str, Any]],
-    exit_signals: list[dict[str, Any]],
-    event_log: Path | None = None,
-    run_id: str | None = None,
-) -> list[dict[str, Any]]:
-    eligible_position_ids = {
-        str(signal.get("position_id") or "").strip()
-        for signal in exit_signals
-        if str(signal.get("exit_decision") or "") == "FULL_EXIT" and str(signal.get("position_id") or "").strip()
-    }
-    if not eligible_position_ids:
-        return []
-
-    positions_by_id = {str(position.get("position_id") or "").strip(): position for position in state.get("positions", []) if str(position.get("position_id") or "").strip()}
-    starting_capital_sol = float(
-        state.get("portfolio", {}).get("starting_capital_sol")
-        or state.get("counters", {}).get("starting_capital_sol")
-        or state.get("starting_capital_sol")
-        or 0.0
-    )
-
-    closed_outcomes: list[dict[str, Any]] = []
-    for position_id in sorted(eligible_position_ids):
-        before = before_open_positions.get(position_id)
-        after = positions_by_id.get(position_id)
-        if not before or not after or after.get("is_open"):
-            continue
-        realized_pnl_sol = float(after.get("realized_pnl_sol") or 0.0) - float(before.get("realized_pnl_sol") or 0.0)
-        pnl_pct = (realized_pnl_sol / starting_capital_sol * 100.0) if starting_capital_sol > 0 else 0.0
-        apply_closed_trade_outcome(
-            state,
-            pnl_pct=pnl_pct,
-            realized_pnl_sol=realized_pnl_sol,
-            starting_capital_sol=starting_capital_sol if starting_capital_sol > 0 else None,
-        )
-        closed_outcomes.append(
-            {
-                "position_id": position_id,
-                "token_address": after.get("token_address"),
-                "realized_pnl_sol": realized_pnl_sol,
-                "pnl_pct": pnl_pct,
-            }
-        )
-
-    if event_log is not None and closed_outcomes:
-        _append_run_artifact(
-            event_log,
-            {
-                "ts": utc_now_iso(),
-                "event": "runtime_closed_trade_outcomes_recorded",
-                "run_id": run_id,
-                "closed_trade_count": len(closed_outcomes),
-                "closed_trades": closed_outcomes,
-            },
-        )
-    return closed_outcomes
-
-
 def _runtime_market_state_cache(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return state.setdefault("runtime_market_state_cache", {})
 
@@ -651,13 +531,9 @@ def _accumulate_runtime_metrics(state: dict[str, Any], current_state_summary: di
         metrics[key] = int(metrics.get(key, 0)) + int(value or 0)
 
 
-def _build_current_states(
-    state: dict[str, Any],
-    signals: list[dict[str, Any]],
-    market_states: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    live_market_states = market_states if market_states is not None else _build_market_states(signals)
-    market_by_token = {str(item.get("token_address") or ""): item for item in live_market_states}
+def _build_current_states(state: dict[str, Any], signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    market_states = _build_market_states(signals)
+    market_by_token = {str(item.get("token_address") or ""): item for item in market_states}
     cache = _runtime_market_state_cache(state)
     current_states: list[dict[str, Any]] = []
     for position in _state_open_positions(state):
@@ -677,8 +553,7 @@ def _build_current_states(
         current.setdefault("now_ts", utc_now_iso())
 
         if token in market_by_token:
-            market_source = str(current.get("_runtime_market_source") or "signal_derived")
-            current["runtime_current_state_origin"] = "market_states_artifact" if market_source == "market_states_artifact" else "fresh_signal_batch"
+            current["runtime_current_state_origin"] = "fresh_signal_batch"
             current["runtime_current_state_status"] = "live_refresh"
             current["runtime_current_state_warning"] = None
             current["runtime_current_state_confidence"] = 1.0
@@ -774,7 +649,6 @@ def main() -> int:
     trading_settings = _build_runtime_trading_settings(cfg, args, run_dir)
     state["paths"] = {"signals": run_dir / "signals.jsonl", "trades": run_dir / "trades.jsonl", "segment_by_day": True}
     ensure_state(state, trading_settings)
-    state["starting_capital_sol"] = float(state.get("portfolio", {}).get("starting_capital_sol") or state.get("starting_capital_sol") or 0.0)
     _sync_open_positions_compat(state)
 
     manifest = {
@@ -817,45 +691,14 @@ def main() -> int:
 
     for loop_idx in range(args.max_loops):
         roll_daily_state_if_needed(state)
-        state["settlement_cycle_seq"] = int(state.get("settlement_cycle_seq") or 0) + 1
-        state["portfolio"]["settlement_cycle_seq"] = state["settlement_cycle_seq"]
-        settlement_release = release_pending_settlements(state)
-        _append_run_artifact(
-            event_log,
-            {
-                "ts": utc_now_iso(),
-                "event": "runtime_settlement_cycle_advanced",
-                "run_id": args.run_id,
-                "settlement_cycle_seq": state["settlement_cycle_seq"],
-                "released_count": settlement_release.get("released_count", 0),
-                "released_sol": settlement_release.get("released_sol", 0.0),
-            },
-        )
-
         signals, signal_summary = _load_normalized_signals(args, loop_idx)
-        runtime_market_states, runtime_market_states_path, runtime_market_states_warning = _load_runtime_market_states(args.signals_dir)
-        merged_market_states = _merge_signal_and_market_states(signals, runtime_market_states)
-        if runtime_market_states_path:
-            signal_summary.setdefault("runtime_market_states_path", runtime_market_states_path)
-        if runtime_market_states_warning:
-            signal_summary.setdefault("warnings", []).append(runtime_market_states_warning)
-            _append_run_artifact(
-                event_log,
-                {
-                    "ts": utc_now_iso(),
-                    "event": "runtime_market_states_warning",
-                    "run_id": args.run_id,
-                    "warning": runtime_market_states_warning,
-                    "market_states_path": runtime_market_states_path,
-                },
-            )
         latest_signal_summary = signal_summary
         _emit_signal_batch_events(event_log, args.run_id, signal_summary)
         _increment_runtime_health_counters(state, signals)
         opened = 0
         rejected = 0
 
-        current_states = _build_current_states(state, signals, merged_market_states)
+        current_states = _build_current_states(state, signals)
         current_state_summary = _summarize_current_states(current_states)
         _accumulate_runtime_metrics(state, current_state_summary)
         _append_run_artifact(
@@ -867,20 +710,10 @@ def main() -> int:
                 **current_state_summary,
             },
         )
-        exit_signals: list[dict[str, Any]] = []
-        closed_trade_outcomes: list[dict[str, Any]] = []
         if _state_open_positions(state):
-            before_exit_positions = _snapshot_open_position_state(state)
             run_mark_to_market(state, current_states, trading_settings)
             exit_signals = decide_exits(_state_open_positions(state), current_states, trading_settings)
             state = process_exit_signals(exit_signals, current_states, state, trading_settings)
-            closed_trade_outcomes = _record_closed_trade_outcomes(
-                state,
-                before_open_positions=before_exit_positions,
-                exit_signals=exit_signals,
-                event_log=event_log,
-                run_id=args.run_id,
-            )
             _sync_open_positions_compat(state)
             _append_run_artifact(
                 event_log,
@@ -891,14 +724,14 @@ def main() -> int:
                     "evaluated_positions": len(exit_signals),
                     "full_exit_count": len([row for row in exit_signals if row.get("exit_decision") == "FULL_EXIT"]),
                     "partial_exit_count": len([row for row in exit_signals if row.get("exit_decision") == "PARTIAL_EXIT"]),
-                    "closed_trade_count": len(closed_trade_outcomes),
                 },
             )
 
-        _update_runtime_market_state_cache(state, merged_market_states)
+        market_states = _build_market_states(signals)
+        _update_runtime_market_state_cache(state, market_states)
         _prune_runtime_market_state_cache(
             state,
-            merged_market_states,
+            market_states,
             event_log=event_log,
             max_cache_age_sec=int(cfg.get("runtime", {}).get("runtime_market_cache_ttl_sec", 21_600) or 21_600),
             max_cache_entries=int(cfg.get("runtime", {}).get("runtime_market_cache_max_entries", 512) or 512),
@@ -1007,7 +840,7 @@ def main() -> int:
             entry_signal = dict(signal)
             entry_signal["base_position_pct"] = runtime_position_pct
             entry_signal["effective_position_pct"] = runtime_position_pct
-            state = process_entry_signals([entry_signal], merged_market_states, state, trading_settings)
+            state = process_entry_signals([entry_signal], market_states, state, trading_settings)
             opened_position = next(
                 (
                     position
@@ -1027,6 +860,8 @@ def main() -> int:
                 if signal.get("x_status") == "degraded":
                     for _ in range(opened_delta):
                         register_degraded_x_entry_opened(state)
+                for _ in range(opened_delta):
+                    update_trade_counters(state, pnl_pct=0.0)
                 _append_run_artifact(
                     decisions_log,
                     {
@@ -1094,7 +929,6 @@ def main() -> int:
         "trades_today": state.get("counters", {}).get("trades_today", 0),
         "open_positions": len(_state_open_positions(state)),
         "pnl_pct_today": state.get("counters", {}).get("pnl_pct_today", 0.0),
-        "realized_pnl_sol_today": state.get("counters", {}).get("realized_pnl_sol_today", 0.0),
         "consecutive_losses": state.get("consecutive_losses", 0),
         "x_cooldown_active": is_x_cooldown_active(state),
         "x_cooldown_skip_count": runtime_metrics.get("x_cooldown_skip_count", 0),
