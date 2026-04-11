@@ -1,0 +1,101 @@
+{
+  "clusters": [
+    {
+      "cluster_confidence": 0.696667,
+      "cluster_id": "cluster_wallet_a_14a16de433b1",
+      "creator_linked_flag": false,
+      "derived_from": "graph_evidence",
+      "edge_count": 1,
+      "evidence_types": [
+        "co_bundle_window",
+        "same_launch",
+        "shared_funder"
+      ],
+      "funding_sources_seen": [
+        "funder_1"
+      ],
+      "launches_seen": [
+        "launch_alpha"
+      ],
+      "wallet_count": 2,
+      "wallets": [
+        "wallet_a",
+        "wallet_b"
+      ]
+    },
+    {
+      "cluster_confidence": 0.696667,
+      "cluster_id": "cluster_wallet_c_d161be801d46",
+      "creator_linked_flag": false,
+      "derived_from": "graph_evidence",
+      "edge_count": 1,
+      "evidence_types": [
+        "co_bundle_window",
+        "same_launch",
+        "shared_funder"
+      ],
+      "funding_sources_seen": [
+        "funder_2"
+      ],
+      "launches_seen": [
+        "launch_beta"
+      ],
+      "wallet_count": 2,
+      "wallets": [
+        "wallet_c",
+        "wallet_d"
+      ]
+    },
+    {
+      "cluster_confidence": 0.696667,
+      "cluster_id": "cluster_wallet_e_6bd8b8827ecc",
+      "creator_linked_flag": false,
+      "derived_from": "graph_evidence",
+      "edge_count": 1,
+      "evidence_types": [
+        "co_bundle_window",
+        "same_launch",
+        "shared_funder"
+      ],
+      "funding_sources_seen": [
+        "funder_3"
+      ],
+      "launches_seen": [
+        "launch_gamma"
+      ],
+      "wallet_count": 2,
+      "wallets": [
+        "wallet_e",
+        "wallet_f"
+      ]
+    }
+  ],
+  "metadata": {
+    "contract_version": "wallet_clusters.v1",
+    "derivation_mode": "graph_connected_components",
+    "fixture": "organic_multi_cluster",
+    "generated_at": "2026-04-11T00:17:53Z",
+    "smoke": true,
+    "source_contract_version": "wallet_graph.v1"
+  },
+  "summary": {
+    "cluster_count": 3,
+    "cluster_ids": [
+      "cluster_wallet_a_14a16de433b1",
+      "cluster_wallet_c_d161be801d46",
+      "cluster_wallet_e_6bd8b8827ecc"
+    ],
+    "edge_count": 3,
+    "node_count": 6,
+    "wallet_coverage_count": 6
+  },
+  "wallet_to_cluster": {
+    "wallet_a": "cluster_wallet_a_14a16de433b1",
+    "wallet_b": "cluster_wallet_a_14a16de433b1",
+    "wallet_c": "cluster_wallet_c_d161be801d46",
+    "wallet_d": "cluster_wallet_c_d161be801d46",
+    "wallet_e": "cluster_wallet_e_6bd8b8827ecc",
+    "wallet_f": "cluster_wallet_e_6bd8b8827ecc"
+  },
+  "warnings": []
+}

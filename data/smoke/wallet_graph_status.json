@@ -1,0 +1,9 @@
+{
+  "cluster_count": 3,
+  "cluster_path": "/Users/ivansbobrovs/Downloads/1solana-coin-signal-engine-main/data/smoke/wallet_clusters.smoke.json",
+  "event_path": "/Users/ivansbobrovs/Downloads/1solana-coin-signal-engine-main/data/smoke/wallet_graph_events.smoke.jsonl",
+  "graph_edges": 3,
+  "graph_nodes": 6,
+  "graph_path": "/Users/ivansbobrovs/Downloads/1solana-coin-signal-engine-main/data/smoke/wallet_graph.smoke.json",
+  "status": "ok"
+}

@@ -10,6 +10,9 @@
       "sizing": {
         "base_position_pct": 0.42,
         "contract_version": "evidence_weighted_sizing.v1",
+        "discovery_lag_blocked_trend": false,
+        "discovery_lag_penalty_applied": false,
+        "discovery_lag_size_multiplier": 1.0,
         "effective_position_pct": 0.42,
         "effective_position_scale": 1.0,
         "evidence_available": [
@@ -23,9 +26,9 @@
         ],
         "evidence_conflict_flag": false,
         "evidence_coverage_ratio": 1.0,
-        "evidence_quality_score": 0.8007,
+        "evidence_quality_score": 0.7321,
         "evidence_scores": {
-          "cluster": 0.74,
+          "cluster": 0.26,
           "continuation": 0.79,
           "linkage": 0.82,
           "regime": 0.86,
@@ -33,14 +36,14 @@
           "wallet": 0.675,
           "x": 0.84
         },
-        "generated_at": "2026-03-20T12:11:36.299962+00:00",
+        "generated_at": "2026-04-11T00:17:06.294421+00:00",
         "mode_position_scale": 1.0,
         "partial_evidence_flag": false,
         "policy_origin": "mode_policy_only",
         "policy_reason_codes": [],
         "recommended_position_pct": 0.42,
         "signal_id": "fixture_strong",
-        "sizing_confidence": 0.8007,
+        "sizing_confidence": 0.7321,
         "sizing_multiplier": 1.0,
         "sizing_origin": "evidence_weighted",
         "sizing_reason_codes": [
@@ -62,6 +65,9 @@
       "sizing": {
         "base_position_pct": 0.2,
         "contract_version": "evidence_weighted_sizing.v1",
+        "discovery_lag_blocked_trend": false,
+        "discovery_lag_penalty_applied": false,
+        "discovery_lag_size_multiplier": 1.0,
         "effective_position_pct": 0.2,
         "effective_position_scale": 0.5,
         "evidence_available": [
@@ -74,16 +80,16 @@
         ],
         "evidence_conflict_flag": false,
         "evidence_coverage_ratio": 0.8571,
-        "evidence_quality_score": 0.6457,
+        "evidence_quality_score": 0.5857,
         "evidence_scores": {
-          "cluster": 0.68,
+          "cluster": 0.32,
           "continuation": 0.63,
           "linkage": 0.7,
           "regime": 0.77,
           "runtime": 0.73,
           "x": 0.364
         },
-        "generated_at": "2026-03-20T12:11:36.300218+00:00",
+        "generated_at": "2026-04-11T00:17:06.295530+00:00",
         "mode_position_scale": 1.0,
         "partial_evidence_flag": false,
         "policy_origin": "degraded_x_policy",
@@ -92,7 +98,7 @@
         ],
         "recommended_position_pct": 0.4,
         "signal_id": "fixture_degraded_x",
-        "sizing_confidence": 0.6457,
+        "sizing_confidence": 0.5857,
         "sizing_multiplier": 1.0,
         "sizing_origin": "degraded_x_policy",
         "sizing_reason_codes": [
@@ -116,6 +122,9 @@
       "sizing": {
         "base_position_pct": 0.35,
         "contract_version": "evidence_weighted_sizing.v1",
+        "discovery_lag_blocked_trend": false,
+        "discovery_lag_penalty_applied": false,
+        "discovery_lag_size_multiplier": 1.0,
         "effective_position_pct": 0.1837,
         "effective_position_scale": 0.5249,
         "evidence_available": [
@@ -135,7 +144,7 @@
           "runtime": 0.58,
           "x": 0.68
         },
-        "generated_at": "2026-03-20T12:11:36.300584+00:00",
+        "generated_at": "2026-04-11T00:17:06.296025+00:00",
         "mode_position_scale": 1.0,
         "partial_evidence_flag": true,
         "policy_origin": "mode_policy_only",
@@ -165,6 +174,9 @@
       "sizing": {
         "base_position_pct": 0.45,
         "contract_version": "evidence_weighted_sizing.v1",
+        "discovery_lag_blocked_trend": false,
+        "discovery_lag_penalty_applied": false,
+        "discovery_lag_size_multiplier": 1.0,
         "effective_position_pct": 0.1733,
         "effective_position_scale": 0.3851,
         "evidence_available": [
@@ -177,23 +189,23 @@
         ],
         "evidence_conflict_flag": true,
         "evidence_coverage_ratio": 0.8571,
-        "evidence_quality_score": 0.7817,
+        "evidence_quality_score": 0.7117,
         "evidence_scores": {
-          "cluster": 0.71,
+          "cluster": 0.29,
           "continuation": 0.74,
           "linkage": 0.8,
           "regime": 0.83,
           "runtime": 0.79,
           "x": 0.82
         },
-        "generated_at": "2026-03-20T12:11:36.300855+00:00",
+        "generated_at": "2026-04-11T00:17:06.296483+00:00",
         "mode_position_scale": 1.0,
         "partial_evidence_flag": false,
         "policy_origin": "mode_policy_only",
         "policy_reason_codes": [],
         "recommended_position_pct": 0.45,
         "signal_id": "fixture_link_risk",
-        "sizing_confidence": 0.5472,
+        "sizing_confidence": 0.4982,
         "sizing_multiplier": 0.3851,
         "sizing_origin": "risk_reduced",
         "sizing_reason_codes": [
@@ -216,6 +228,9 @@
       "sizing": {
         "base_position_pct": 0.38,
         "contract_version": "evidence_weighted_sizing.v1",
+        "discovery_lag_blocked_trend": false,
+        "discovery_lag_penalty_applied": false,
+        "discovery_lag_size_multiplier": 1.0,
         "effective_position_pct": 0.1197,
         "effective_position_scale": 0.315,
         "evidence_available": [
@@ -228,23 +243,23 @@
         ],
         "evidence_conflict_flag": true,
         "evidence_coverage_ratio": 0.8571,
-        "evidence_quality_score": 0.6407,
+        "evidence_quality_score": 0.6593,
         "evidence_scores": {
-          "cluster": 0.344,
+          "cluster": 0.456,
           "continuation": 0.32,
           "linkage": 0.78,
           "regime": 0.84,
           "runtime": 0.81,
           "x": 0.75
         },
-        "generated_at": "2026-03-20T12:11:36.301099+00:00",
+        "generated_at": "2026-04-11T00:17:06.297228+00:00",
         "mode_position_scale": 1.0,
         "partial_evidence_flag": false,
         "policy_origin": "mode_policy_only",
         "policy_reason_codes": [],
         "recommended_position_pct": 0.38,
         "signal_id": "fixture_conflict",
-        "sizing_confidence": 0.4485,
+        "sizing_confidence": 0.4615,
         "sizing_multiplier": 0.315,
         "sizing_origin": "risk_reduced",
         "sizing_reason_codes": [
@@ -272,6 +287,9 @@
       "sizing": {
         "base_position_pct": 0.2,
         "contract_version": "evidence_weighted_sizing.v1",
+        "discovery_lag_blocked_trend": false,
+        "discovery_lag_penalty_applied": false,
+        "discovery_lag_size_multiplier": 1.0,
         "effective_position_pct": 0.2,
         "effective_position_scale": 0.5,
         "evidence_available": [
@@ -289,7 +307,7 @@
           "runtime": 0.8,
           "x": 0.8
         },
-        "generated_at": "2026-03-20T12:11:36.301404+00:00",
+        "generated_at": "2026-04-11T00:17:06.299126+00:00",
         "mode_position_scale": 0.5,
         "partial_evidence_flag": false,
         "policy_origin": "mode_policy_only",
@@ -318,6 +336,9 @@
       "sizing": {
         "base_position_pct": 0.28,
         "contract_version": "evidence_weighted_sizing.v1",
+        "discovery_lag_blocked_trend": false,
+        "discovery_lag_penalty_applied": false,
+        "discovery_lag_size_multiplier": 1.0,
         "effective_position_pct": 0.1092,
         "effective_position_scale": 0.39,
         "evidence_available": [
@@ -329,7 +350,7 @@
         "evidence_scores": {
           "x": 0.25
         },
-        "generated_at": "2026-03-20T12:11:36.301640+00:00",
+        "generated_at": "2026-04-11T00:17:06.300623+00:00",
         "mode_position_scale": 1.0,
         "partial_evidence_flag": true,
         "policy_origin": "mode_policy_only",

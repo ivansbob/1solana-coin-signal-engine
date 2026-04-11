@@ -1,0 +1,58 @@
+{
+  "next_position_seq": 2,
+  "next_trade_seq": 2,
+  "positions": [
+    {
+      "base_position_pct": 0.5,
+      "contract_version": null,
+      "effective_position_pct": 0.3,
+      "entry_decision": "SCALP",
+      "entry_fill_ratio": 1.0,
+      "entry_price_usd": 1.015240035,
+      "entry_snapshot": {
+        "buy_pressure": 0.82,
+        "liquidity_usd": 1000000,
+        "price_usd": 1.0,
+        "volume_velocity": 4.2,
+        "x_validation_score": 82
+      },
+      "evidence_conflict_flag": false,
+      "evidence_quality_score": 0.78,
+      "fees_paid_sol": 2e-05,
+      "is_open": true,
+      "last_mark_price_usd": 1.0,
+      "last_updated_at": "2026-04-11T00:17:13Z",
+      "opened_at": "2026-04-11T00:17:13Z",
+      "partial_1_taken": false,
+      "partial_2_taken": false,
+      "partial_evidence_flag": false,
+      "partials_taken": [],
+      "position_id": "pos_0001",
+      "position_size_sol": 0.03,
+      "realized_pnl_sol": 0.0,
+      "recommended_position_pct": 0.75,
+      "remaining_size_sol": 0.03,
+      "sizing_confidence": 0.86,
+      "sizing_multiplier": 0.6,
+      "sizing_origin": "historical_replay_canonical",
+      "sizing_reason_codes": [
+        "historical_replay_canonical_bridge",
+        "preserve_precomputed_effective_position_pct"
+      ],
+      "smart_wallet_family_confidence_max": 0.0,
+      "smart_wallet_family_creator_link_flag": false,
+      "smart_wallet_family_ids": [],
+      "smart_wallet_family_member_count_max": 0,
+      "smart_wallet_family_origins": [],
+      "smart_wallet_family_reason_codes": [],
+      "smart_wallet_family_shared_funder_flag": false,
+      "smart_wallet_family_statuses": [],
+      "smart_wallet_family_unique_count": 0,
+      "smart_wallet_independent_family_ids": [],
+      "smart_wallet_independent_family_unique_count": 0,
+      "symbol": "CANON",
+      "token_address": "So11111111111111111111111111111111111111112",
+      "unrealized_pnl_sol": -0.0004503378848727118
+    }
+  ]
+}

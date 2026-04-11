@@ -1,0 +1,16 @@
+{
+  "as_of": "2026-04-11T00:17:13Z",
+  "capital_in_positions_sol": 0.03,
+  "closed_positions": 0,
+  "contract_version": "paper_trader_v1",
+  "equity_sol": 0.0995496621151273,
+  "free_capital_sol": 0.06998000000000001,
+  "open_positions": 1,
+  "pending_settlement_count": 0,
+  "pending_settlement_sol": 0,
+  "realized_pnl_sol": 0.0,
+  "reserved_fees_sol": 2e-05,
+  "settlement_cycle_seq": 0,
+  "starting_capital_sol": 0.1,
+  "unrealized_pnl_sol": -0.0004503378848727118
+}

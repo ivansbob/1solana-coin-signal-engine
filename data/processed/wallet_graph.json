@@ -1,17 +1,11 @@
 {
   "edges": [
     {
-      "evidence_count": 2,
+      "evidence_count": 1,
       "evidence_types": [
-        "co_bundle_window",
-        "shared_funder"
+        "co_bundle_window"
       ],
       "provenance": [
-        {
-          "evidence_type": "shared_funder",
-          "funder": "funder_alpha",
-          "weight": 0.85
-        },
         {
           "evidence_type": "co_bundle_window",
           "group": "slot:10",
@@ -20,41 +14,45 @@
       ],
       "source": "wallet_a",
       "target": "wallet_b",
-      "weight": 0.65
+      "weight": 0.45
     },
     {
-      "evidence_count": 2,
+      "evidence_count": 1,
       "evidence_types": [
-        "co_bundle_window",
-        "shared_funder"
+        "co_bundle_window"
       ],
       "provenance": [
         {
-          "evidence_type": "shared_funder",
-          "funder": "funder_beta",
-          "weight": 0.85
-        },
-        {
           "evidence_type": "co_bundle_window",
-          "group": "slot:20",
+          "group": "slot:11",
           "weight": 0.45
         }
       ],
       "source": "wallet_c",
       "target": "wallet_d",
-      "weight": 0.65
+      "weight": 0.45
     }
   ],
   "metadata": {
     "contract_version": "wallet_graph.v1",
-    "generated_at": "2026-03-21T21:17:48Z"
+    "generated_at": "2026-04-11T00:16:53Z",
+    "pair_address": "pair-1",
+    "token_address": "token-1"
   },
   "nodes": [
     {
       "creator_linked": false,
-      "funders": [
-        "funder_alpha"
+      "funders": [],
+      "groups": [
+        "100"
       ],
+      "launches": [],
+      "timestamps": [],
+      "wallet": "w1"
+    },
+    {
+      "creator_linked": false,
+      "funders": [],
       "groups": [
         "slot:10"
       ],
@@ -64,9 +62,7 @@
     },
     {
       "creator_linked": false,
-      "funders": [
-        "funder_alpha"
-      ],
+      "funders": [],
       "groups": [
         "slot:10"
       ],
@@ -76,11 +72,9 @@
     },
     {
       "creator_linked": false,
-      "funders": [
-        "funder_beta"
-      ],
+      "funders": [],
       "groups": [
-        "slot:20"
+        "slot:11"
       ],
       "launches": [],
       "timestamps": [],
@@ -88,11 +82,9 @@
     },
     {
       "creator_linked": false,
-      "funders": [
-        "funder_beta"
-      ],
+      "funders": [],
       "groups": [
-        "slot:20"
+        "slot:11"
       ],
       "launches": [],
       "timestamps": [],
@@ -100,13 +92,12 @@
     }
   ],
   "summary": {
-    "density": 0.333333,
+    "density": 0.2,
     "edge_count": 2,
     "evidence_types": [
-      "co_bundle_window",
-      "shared_funder"
+      "co_bundle_window"
     ],
-    "node_count": 4,
+    "node_count": 5,
     "warning_count": 0
   },
   "warnings": []

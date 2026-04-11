@@ -1,0 +1,36 @@
+{
+  "attempts_by_provider_route_kind": {
+    "birdeye_ohlcv_v3:token": 1
+  },
+  "complete_rows": 1,
+  "completed_input": true,
+  "consecutive_failures": 0,
+  "cooldown_skips": 0,
+  "failure_class_counts": {},
+  "fallback_used_count": 0,
+  "global_cooldown_trigger_count": 0,
+  "max_consecutive_failures_reached": false,
+  "max_tokens_reached": false,
+  "missing_rows": 0,
+  "negative_cache_skips": 0,
+  "non_retryable_failures": 0,
+  "partial_usable_rows": 0,
+  "provider_timeout_count": 0,
+  "retryable_failures": 0,
+  "rows_written": 1,
+  "selected_route_provider_counts": {
+    "birdeye_ohlcv_v3": 1
+  },
+  "status_counts": {
+    "complete": 1,
+    "missing": 0,
+    "partial_usable": 0
+  },
+  "stop_reason": "completed_input",
+  "target_usable_rows_reached": false,
+  "tokens_seen": 1,
+  "usable_complete_rows": 1,
+  "usable_for_sampling_rows": 0,
+  "usable_partial_rows": 0,
+  "usable_rows_collected": 1
+}

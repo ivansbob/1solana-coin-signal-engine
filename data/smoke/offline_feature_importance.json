@@ -7,12 +7,21 @@
     "Outputs must not be wired into online/runtime decisioning in this PR.",
     "Sparse coverage and class imbalance reduce confidence and should be reviewed manually."
   ],
+  "excluded_feature_names": [
+    "exit_reason_final",
+    "hold_sec",
+    "mae_pct_240s",
+    "mfe_pct_240s",
+    "net_pnl_pct",
+    "time_to_first_profit_sec",
+    "trend_survival_15m"
+  ],
   "generated_at_utc": "2026-03-20T00:00:00Z",
   "input_artifact": {
     "excluded_row_count": 0,
     "excluded_rows": [],
     "malformed_row_count": 0,
-    "path": "/workspace/solana-coin-signal-engine/tests/fixtures/offline_feature_importance/healthy_mixed_replay_matrix.jsonl",
+    "path": "/Users/ivansbobrovs/Downloads/1solana-coin-signal-engine-main/tests/fixtures/offline_feature_importance/healthy_mixed_replay_matrix.jsonl",
     "row_count": 8,
     "total_rows_seen": 8
   },
@@ -69,19 +78,6 @@
       "grouped_importance": [
         {
           "coverage_ratio_avg": 1.0,
-          "feature_count": 6,
-          "feature_group": "exit_features",
-          "importance_score_avg": 1.659401,
-          "importance_score_total": 9.956403,
-          "target_name": "profitable_trade_flag",
-          "top_features": [
-            "time_to_first_profit_sec",
-            "mae_pct_240s",
-            "trend_survival_15m"
-          ]
-        },
-        {
-          "coverage_ratio_avg": 1.0,
           "feature_count": 4,
           "feature_group": "continuation_features",
           "importance_score_avg": 1.914868,
@@ -132,17 +128,6 @@
         {
           "coverage_ratio_avg": 1.0,
           "feature_count": 1,
-          "feature_group": "uncategorized_features",
-          "importance_score_avg": 1.922212,
-          "importance_score_total": 1.922212,
-          "target_name": "profitable_trade_flag",
-          "top_features": [
-            "net_pnl_pct"
-          ]
-        },
-        {
-          "coverage_ratio_avg": 1.0,
-          "feature_count": 1,
           "feature_group": "regime_features",
           "importance_score_avg": 1.870772,
           "importance_score_total": 1.870772,
@@ -183,25 +168,9 @@
         {
           "coverage_ratio": 1.0,
           "direction_hint": "negative_association",
-          "feature_group": "exit_features",
-          "feature_name": "time_to_first_profit_sec",
-          "importance_rank": 2,
-          "importance_score": 2.061664,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "profitable_trade_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "negative_association",
           "feature_group": "cluster_features",
           "feature_name": "cluster_concentration_ratio",
-          "importance_rank": 3,
+          "importance_rank": 2,
           "importance_score": 2.011634,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -217,24 +186,8 @@
           "direction_hint": "negative_association",
           "feature_group": "continuation_features",
           "feature_name": "seller_reentry_ratio",
-          "importance_rank": 4,
+          "importance_rank": 3,
           "importance_score": 2.008392,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "profitable_trade_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "positive_association",
-          "feature_group": "exit_features",
-          "feature_name": "mae_pct_240s",
-          "importance_rank": 5,
-          "importance_score": 1.952766,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
           "observed_rows": 8,
@@ -249,24 +202,8 @@
           "direction_hint": "positive_association",
           "feature_group": "friction_features",
           "feature_name": "buy_pressure_entry",
-          "importance_rank": 6,
+          "importance_rank": 4,
           "importance_score": 1.942224,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "profitable_trade_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "positive_association",
-          "feature_group": "uncategorized_features",
-          "feature_name": "net_pnl_pct",
-          "importance_rank": 7,
-          "importance_score": 1.922212,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
           "observed_rows": 8,
@@ -281,7 +218,7 @@
           "direction_hint": "positive_association",
           "feature_group": "continuation_features",
           "feature_name": "smart_wallet_dispersion_score",
-          "importance_rank": 8,
+          "importance_rank": 5,
           "importance_score": 1.921046,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -297,7 +234,7 @@
           "direction_hint": "positive_association",
           "feature_group": "continuation_features",
           "feature_name": "liquidity_refill_ratio_120s",
-          "importance_rank": 9,
+          "importance_rank": 6,
           "importance_score": 1.916699,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -313,24 +250,8 @@
           "direction_hint": "positive_association",
           "feature_group": "regime_features",
           "feature_name": "regime_confidence",
-          "importance_rank": 10,
+          "importance_rank": 7,
           "importance_score": 1.870772,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "profitable_trade_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "positive_association",
-          "feature_group": "exit_features",
-          "feature_name": "trend_survival_15m",
-          "importance_rank": 11,
-          "importance_score": 1.864977,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
           "observed_rows": 8,
@@ -345,7 +266,7 @@
           "direction_hint": "negative_association",
           "feature_group": "bundle_features",
           "feature_name": "bundle_count_first_60s",
-          "importance_rank": 12,
+          "importance_rank": 8,
           "importance_score": 1.847521,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -361,7 +282,7 @@
           "direction_hint": "positive_association",
           "feature_group": "x_features",
           "feature_name": "x_author_velocity_5m",
-          "importance_rank": 13,
+          "importance_rank": 9,
           "importance_score": 1.832583,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -377,40 +298,8 @@
           "direction_hint": "positive_association",
           "feature_group": "continuation_features",
           "feature_name": "net_unique_buyers_60s",
-          "importance_rank": 14,
+          "importance_rank": 10,
           "importance_score": 1.813333,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "profitable_trade_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "positive_association",
-          "feature_group": "exit_features",
-          "feature_name": "hold_sec",
-          "importance_rank": 15,
-          "importance_score": 1.806035,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "profitable_trade_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "positive_association",
-          "feature_group": "exit_features",
-          "feature_name": "mfe_pct_240s",
-          "importance_rank": 16,
-          "importance_score": 1.802211,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
           "observed_rows": 8,
@@ -425,7 +314,7 @@
           "direction_hint": "positive_association",
           "feature_group": "friction_features",
           "feature_name": "liquidity_usd",
-          "importance_rank": 17,
+          "importance_rank": 11,
           "importance_score": 1.782861,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -439,25 +328,9 @@
         {
           "coverage_ratio": 1.0,
           "direction_hint": "negative_association",
-          "feature_group": "exit_features",
-          "feature_name": "exit_reason_final",
-          "importance_rank": 18,
-          "importance_score": 0.46875,
-          "method": "univariate_categorical_rate_gap",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "profitable_trade_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "negative_association",
           "feature_group": "bundle_features",
           "feature_name": "bundle_composition_dominant",
-          "importance_rank": 19,
+          "importance_rank": 12,
           "importance_score": 0.46875,
           "method": "univariate_categorical_rate_gap",
           "missing_ratio": 0.0,
@@ -476,37 +349,17 @@
         "profitable_trade_flag:buy_pressure_entry:limited observed rows (8)",
         "profitable_trade_flag:cluster_concentration_ratio:limited observed rows (8)",
         "profitable_trade_flag:creator_in_cluster_flag:limited observed rows (8)",
-        "profitable_trade_flag:exit_reason_final:limited observed rows (8)",
-        "profitable_trade_flag:hold_sec:limited observed rows (8)",
         "profitable_trade_flag:liquidity_refill_ratio_120s:limited observed rows (8)",
         "profitable_trade_flag:liquidity_usd:limited observed rows (8)",
-        "profitable_trade_flag:mae_pct_240s:limited observed rows (8)",
-        "profitable_trade_flag:mfe_pct_240s:limited observed rows (8)",
-        "profitable_trade_flag:net_pnl_pct:limited observed rows (8)",
         "profitable_trade_flag:net_unique_buyers_60s:limited observed rows (8)",
         "profitable_trade_flag:regime_confidence:limited observed rows (8)",
         "profitable_trade_flag:seller_reentry_ratio:limited observed rows (8)",
         "profitable_trade_flag:smart_wallet_dispersion_score:limited observed rows (8)",
-        "profitable_trade_flag:time_to_first_profit_sec:limited observed rows (8)",
-        "profitable_trade_flag:trend_survival_15m:limited observed rows (8)",
         "profitable_trade_flag:x_author_velocity_5m:limited observed rows (8)"
       ]
     },
     {
       "grouped_importance": [
-        {
-          "coverage_ratio_avg": 1.0,
-          "feature_count": 6,
-          "feature_group": "exit_features",
-          "importance_score_avg": 1.447228,
-          "importance_score_total": 8.683368,
-          "target_name": "trend_success_flag",
-          "top_features": [
-            "hold_sec",
-            "trend_survival_15m",
-            "mfe_pct_240s"
-          ]
-        },
         {
           "coverage_ratio_avg": 1.0,
           "feature_count": 4,
@@ -577,42 +430,15 @@
           "top_features": [
             "regime_confidence"
           ]
-        },
-        {
-          "coverage_ratio_avg": 1.0,
-          "feature_count": 1,
-          "feature_group": "uncategorized_features",
-          "importance_score_avg": 1.659642,
-          "importance_score_total": 1.659642,
-          "target_name": "trend_success_flag",
-          "top_features": [
-            "net_pnl_pct"
-          ]
         }
       ],
       "per_feature_importance": [
         {
           "coverage_ratio": 1.0,
           "direction_hint": "positive_association",
-          "feature_group": "exit_features",
-          "feature_name": "hold_sec",
-          "importance_rank": 1,
-          "importance_score": 1.753937,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "trend_success_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "positive_association",
           "feature_group": "x_features",
           "feature_name": "x_author_velocity_5m",
-          "importance_rank": 2,
+          "importance_rank": 1,
           "importance_score": 1.753363,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -628,7 +454,7 @@
           "direction_hint": "negative_association",
           "feature_group": "bundle_features",
           "feature_name": "bundle_count_first_60s",
-          "importance_rank": 3,
+          "importance_rank": 2,
           "importance_score": 1.732051,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -644,7 +470,7 @@
           "direction_hint": "positive_association",
           "feature_group": "regime_features",
           "feature_name": "regime_confidence",
-          "importance_rank": 4,
+          "importance_rank": 3,
           "importance_score": 1.730375,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -660,7 +486,7 @@
           "direction_hint": "positive_association",
           "feature_group": "friction_features",
           "feature_name": "liquidity_usd",
-          "importance_rank": 5,
+          "importance_rank": 4,
           "importance_score": 1.730173,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -676,24 +502,8 @@
           "direction_hint": "positive_association",
           "feature_group": "continuation_features",
           "feature_name": "smart_wallet_dispersion_score",
-          "importance_rank": 6,
+          "importance_rank": 5,
           "importance_score": 1.728512,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "trend_success_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "positive_association",
-          "feature_group": "exit_features",
-          "feature_name": "trend_survival_15m",
-          "importance_rank": 7,
-          "importance_score": 1.727407,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
           "observed_rows": 8,
@@ -708,7 +518,7 @@
           "direction_hint": "positive_association",
           "feature_group": "friction_features",
           "feature_name": "buy_pressure_entry",
-          "importance_rank": 8,
+          "importance_rank": 6,
           "importance_score": 1.713041,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -724,7 +534,7 @@
           "direction_hint": "positive_association",
           "feature_group": "continuation_features",
           "feature_name": "liquidity_refill_ratio_120s",
-          "importance_rank": 9,
+          "importance_rank": 7,
           "importance_score": 1.712411,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -740,40 +550,8 @@
           "direction_hint": "positive_association",
           "feature_group": "continuation_features",
           "feature_name": "net_unique_buyers_60s",
-          "importance_rank": 10,
+          "importance_rank": 8,
           "importance_score": 1.7,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "trend_success_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "positive_association",
-          "feature_group": "uncategorized_features",
-          "feature_name": "net_pnl_pct",
-          "importance_rank": 11,
-          "importance_score": 1.659642,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "trend_success_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "positive_association",
-          "feature_group": "exit_features",
-          "feature_name": "mfe_pct_240s",
-          "importance_rank": 12,
-          "importance_score": 1.649345,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
           "observed_rows": 8,
@@ -788,7 +566,7 @@
           "direction_hint": "negative_association",
           "feature_group": "continuation_features",
           "feature_name": "seller_reentry_ratio",
-          "importance_rank": 13,
+          "importance_rank": 9,
           "importance_score": 1.638716,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -804,40 +582,8 @@
           "direction_hint": "negative_association",
           "feature_group": "cluster_features",
           "feature_name": "cluster_concentration_ratio",
-          "importance_rank": 14,
+          "importance_rank": 10,
           "importance_score": 1.625869,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "trend_success_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "negative_association",
-          "feature_group": "exit_features",
-          "feature_name": "time_to_first_profit_sec",
-          "importance_rank": 15,
-          "importance_score": 1.593697,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "trend_success_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "positive_association",
-          "feature_group": "exit_features",
-          "feature_name": "mae_pct_240s",
-          "importance_rank": 16,
-          "importance_score": 1.583982,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
           "observed_rows": 8,
@@ -852,7 +598,7 @@
           "direction_hint": "negative_association",
           "feature_group": "cluster_features",
           "feature_name": "creator_in_cluster_flag",
-          "importance_rank": 17,
+          "importance_rank": 11,
           "importance_score": 1.549193,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -866,25 +612,9 @@
         {
           "coverage_ratio": 1.0,
           "direction_hint": "positive_association",
-          "feature_group": "exit_features",
-          "feature_name": "exit_reason_final",
-          "importance_rank": 18,
-          "importance_score": 0.375,
-          "method": "univariate_categorical_rate_gap",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "trend_success_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "positive_association",
           "feature_group": "bundle_features",
           "feature_name": "bundle_composition_dominant",
-          "importance_rank": 19,
+          "importance_rank": 12,
           "importance_score": 0.375,
           "method": "univariate_categorical_rate_gap",
           "missing_ratio": 0.0,
@@ -903,37 +633,17 @@
         "trend_success_flag:buy_pressure_entry:limited observed rows (8)",
         "trend_success_flag:cluster_concentration_ratio:limited observed rows (8)",
         "trend_success_flag:creator_in_cluster_flag:limited observed rows (8)",
-        "trend_success_flag:exit_reason_final:limited observed rows (8)",
-        "trend_success_flag:hold_sec:limited observed rows (8)",
         "trend_success_flag:liquidity_refill_ratio_120s:limited observed rows (8)",
         "trend_success_flag:liquidity_usd:limited observed rows (8)",
-        "trend_success_flag:mae_pct_240s:limited observed rows (8)",
-        "trend_success_flag:mfe_pct_240s:limited observed rows (8)",
-        "trend_success_flag:net_pnl_pct:limited observed rows (8)",
         "trend_success_flag:net_unique_buyers_60s:limited observed rows (8)",
         "trend_success_flag:regime_confidence:limited observed rows (8)",
         "trend_success_flag:seller_reentry_ratio:limited observed rows (8)",
         "trend_success_flag:smart_wallet_dispersion_score:limited observed rows (8)",
-        "trend_success_flag:time_to_first_profit_sec:limited observed rows (8)",
-        "trend_success_flag:trend_survival_15m:limited observed rows (8)",
         "trend_success_flag:x_author_velocity_5m:limited observed rows (8)"
       ]
     },
     {
       "grouped_importance": [
-        {
-          "coverage_ratio_avg": 1.0,
-          "feature_count": 6,
-          "feature_group": "exit_features",
-          "importance_score_avg": 1.659401,
-          "importance_score_total": 9.956403,
-          "target_name": "fast_failure_flag",
-          "top_features": [
-            "time_to_first_profit_sec",
-            "mae_pct_240s",
-            "trend_survival_15m"
-          ]
-        },
         {
           "coverage_ratio_avg": 1.0,
           "feature_count": 4,
@@ -986,17 +696,6 @@
         {
           "coverage_ratio_avg": 1.0,
           "feature_count": 1,
-          "feature_group": "uncategorized_features",
-          "importance_score_avg": 1.922212,
-          "importance_score_total": 1.922212,
-          "target_name": "fast_failure_flag",
-          "top_features": [
-            "net_pnl_pct"
-          ]
-        },
-        {
-          "coverage_ratio_avg": 1.0,
-          "feature_count": 1,
           "feature_group": "regime_features",
           "importance_score_avg": 1.870772,
           "importance_score_total": 1.870772,
@@ -1037,25 +736,9 @@
         {
           "coverage_ratio": 1.0,
           "direction_hint": "positive_association",
-          "feature_group": "exit_features",
-          "feature_name": "time_to_first_profit_sec",
-          "importance_rank": 2,
-          "importance_score": 2.061664,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "fast_failure_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "positive_association",
           "feature_group": "cluster_features",
           "feature_name": "cluster_concentration_ratio",
-          "importance_rank": 3,
+          "importance_rank": 2,
           "importance_score": 2.011634,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -1071,24 +754,8 @@
           "direction_hint": "positive_association",
           "feature_group": "continuation_features",
           "feature_name": "seller_reentry_ratio",
-          "importance_rank": 4,
+          "importance_rank": 3,
           "importance_score": 2.008392,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "fast_failure_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "negative_association",
-          "feature_group": "exit_features",
-          "feature_name": "mae_pct_240s",
-          "importance_rank": 5,
-          "importance_score": 1.952766,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
           "observed_rows": 8,
@@ -1103,24 +770,8 @@
           "direction_hint": "negative_association",
           "feature_group": "friction_features",
           "feature_name": "buy_pressure_entry",
-          "importance_rank": 6,
+          "importance_rank": 4,
           "importance_score": 1.942224,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "fast_failure_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "negative_association",
-          "feature_group": "uncategorized_features",
-          "feature_name": "net_pnl_pct",
-          "importance_rank": 7,
-          "importance_score": 1.922212,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
           "observed_rows": 8,
@@ -1135,7 +786,7 @@
           "direction_hint": "negative_association",
           "feature_group": "continuation_features",
           "feature_name": "smart_wallet_dispersion_score",
-          "importance_rank": 8,
+          "importance_rank": 5,
           "importance_score": 1.921046,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -1151,7 +802,7 @@
           "direction_hint": "negative_association",
           "feature_group": "continuation_features",
           "feature_name": "liquidity_refill_ratio_120s",
-          "importance_rank": 9,
+          "importance_rank": 6,
           "importance_score": 1.916699,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -1167,24 +818,8 @@
           "direction_hint": "negative_association",
           "feature_group": "regime_features",
           "feature_name": "regime_confidence",
-          "importance_rank": 10,
+          "importance_rank": 7,
           "importance_score": 1.870772,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "fast_failure_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "negative_association",
-          "feature_group": "exit_features",
-          "feature_name": "trend_survival_15m",
-          "importance_rank": 11,
-          "importance_score": 1.864977,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
           "observed_rows": 8,
@@ -1199,7 +834,7 @@
           "direction_hint": "positive_association",
           "feature_group": "bundle_features",
           "feature_name": "bundle_count_first_60s",
-          "importance_rank": 12,
+          "importance_rank": 8,
           "importance_score": 1.847521,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -1215,7 +850,7 @@
           "direction_hint": "negative_association",
           "feature_group": "x_features",
           "feature_name": "x_author_velocity_5m",
-          "importance_rank": 13,
+          "importance_rank": 9,
           "importance_score": 1.832583,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -1231,40 +866,8 @@
           "direction_hint": "negative_association",
           "feature_group": "continuation_features",
           "feature_name": "net_unique_buyers_60s",
-          "importance_rank": 14,
+          "importance_rank": 10,
           "importance_score": 1.813333,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "fast_failure_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "negative_association",
-          "feature_group": "exit_features",
-          "feature_name": "hold_sec",
-          "importance_rank": 15,
-          "importance_score": 1.806035,
-          "method": "univariate_numeric_effect_size",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "fast_failure_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "negative_association",
-          "feature_group": "exit_features",
-          "feature_name": "mfe_pct_240s",
-          "importance_rank": 16,
-          "importance_score": 1.802211,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
           "observed_rows": 8,
@@ -1279,7 +882,7 @@
           "direction_hint": "negative_association",
           "feature_group": "friction_features",
           "feature_name": "liquidity_usd",
-          "importance_rank": 17,
+          "importance_rank": 11,
           "importance_score": 1.782861,
           "method": "univariate_numeric_effect_size",
           "missing_ratio": 0.0,
@@ -1293,25 +896,9 @@
         {
           "coverage_ratio": 1.0,
           "direction_hint": "positive_association",
-          "feature_group": "exit_features",
-          "feature_name": "exit_reason_final",
-          "importance_rank": 18,
-          "importance_score": 0.46875,
-          "method": "univariate_categorical_rate_gap",
-          "missing_ratio": 0.0,
-          "observed_rows": 8,
-          "status": "ok",
-          "target_name": "fast_failure_flag",
-          "warnings": [
-            "limited observed rows (8)"
-          ]
-        },
-        {
-          "coverage_ratio": 1.0,
-          "direction_hint": "positive_association",
           "feature_group": "bundle_features",
           "feature_name": "bundle_composition_dominant",
-          "importance_rank": 19,
+          "importance_rank": 12,
           "importance_score": 0.46875,
           "method": "univariate_categorical_rate_gap",
           "missing_ratio": 0.0,
@@ -1330,19 +917,12 @@
         "fast_failure_flag:buy_pressure_entry:limited observed rows (8)",
         "fast_failure_flag:cluster_concentration_ratio:limited observed rows (8)",
         "fast_failure_flag:creator_in_cluster_flag:limited observed rows (8)",
-        "fast_failure_flag:exit_reason_final:limited observed rows (8)",
-        "fast_failure_flag:hold_sec:limited observed rows (8)",
         "fast_failure_flag:liquidity_refill_ratio_120s:limited observed rows (8)",
         "fast_failure_flag:liquidity_usd:limited observed rows (8)",
-        "fast_failure_flag:mae_pct_240s:limited observed rows (8)",
-        "fast_failure_flag:mfe_pct_240s:limited observed rows (8)",
-        "fast_failure_flag:net_pnl_pct:limited observed rows (8)",
         "fast_failure_flag:net_unique_buyers_60s:limited observed rows (8)",
         "fast_failure_flag:regime_confidence:limited observed rows (8)",
         "fast_failure_flag:seller_reentry_ratio:limited observed rows (8)",
         "fast_failure_flag:smart_wallet_dispersion_score:limited observed rows (8)",
-        "fast_failure_flag:time_to_first_profit_sec:limited observed rows (8)",
-        "fast_failure_flag:trend_survival_15m:limited observed rows (8)",
         "fast_failure_flag:x_author_velocity_5m:limited observed rows (8)"
       ]
     }
@@ -1355,19 +935,12 @@
     "fast_failure_flag:buy_pressure_entry:limited observed rows (8)",
     "fast_failure_flag:cluster_concentration_ratio:limited observed rows (8)",
     "fast_failure_flag:creator_in_cluster_flag:limited observed rows (8)",
-    "fast_failure_flag:exit_reason_final:limited observed rows (8)",
-    "fast_failure_flag:hold_sec:limited observed rows (8)",
     "fast_failure_flag:liquidity_refill_ratio_120s:limited observed rows (8)",
     "fast_failure_flag:liquidity_usd:limited observed rows (8)",
-    "fast_failure_flag:mae_pct_240s:limited observed rows (8)",
-    "fast_failure_flag:mfe_pct_240s:limited observed rows (8)",
-    "fast_failure_flag:net_pnl_pct:limited observed rows (8)",
     "fast_failure_flag:net_unique_buyers_60s:limited observed rows (8)",
     "fast_failure_flag:regime_confidence:limited observed rows (8)",
     "fast_failure_flag:seller_reentry_ratio:limited observed rows (8)",
     "fast_failure_flag:smart_wallet_dispersion_score:limited observed rows (8)",
-    "fast_failure_flag:time_to_first_profit_sec:limited observed rows (8)",
-    "fast_failure_flag:trend_survival_15m:limited observed rows (8)",
     "fast_failure_flag:x_author_velocity_5m:limited observed rows (8)",
     "low sample size for fast_failure_flag: 8 rows",
     "low sample size for profitable_trade_flag: 8 rows",
@@ -1377,38 +950,24 @@
     "profitable_trade_flag:buy_pressure_entry:limited observed rows (8)",
     "profitable_trade_flag:cluster_concentration_ratio:limited observed rows (8)",
     "profitable_trade_flag:creator_in_cluster_flag:limited observed rows (8)",
-    "profitable_trade_flag:exit_reason_final:limited observed rows (8)",
-    "profitable_trade_flag:hold_sec:limited observed rows (8)",
     "profitable_trade_flag:liquidity_refill_ratio_120s:limited observed rows (8)",
     "profitable_trade_flag:liquidity_usd:limited observed rows (8)",
-    "profitable_trade_flag:mae_pct_240s:limited observed rows (8)",
-    "profitable_trade_flag:mfe_pct_240s:limited observed rows (8)",
-    "profitable_trade_flag:net_pnl_pct:limited observed rows (8)",
     "profitable_trade_flag:net_unique_buyers_60s:limited observed rows (8)",
     "profitable_trade_flag:regime_confidence:limited observed rows (8)",
     "profitable_trade_flag:seller_reentry_ratio:limited observed rows (8)",
     "profitable_trade_flag:smart_wallet_dispersion_score:limited observed rows (8)",
-    "profitable_trade_flag:time_to_first_profit_sec:limited observed rows (8)",
-    "profitable_trade_flag:trend_survival_15m:limited observed rows (8)",
     "profitable_trade_flag:x_author_velocity_5m:limited observed rows (8)",
     "trend_success_flag:bundle_composition_dominant:limited observed rows (8)",
     "trend_success_flag:bundle_count_first_60s:limited observed rows (8)",
     "trend_success_flag:buy_pressure_entry:limited observed rows (8)",
     "trend_success_flag:cluster_concentration_ratio:limited observed rows (8)",
     "trend_success_flag:creator_in_cluster_flag:limited observed rows (8)",
-    "trend_success_flag:exit_reason_final:limited observed rows (8)",
-    "trend_success_flag:hold_sec:limited observed rows (8)",
     "trend_success_flag:liquidity_refill_ratio_120s:limited observed rows (8)",
     "trend_success_flag:liquidity_usd:limited observed rows (8)",
-    "trend_success_flag:mae_pct_240s:limited observed rows (8)",
-    "trend_success_flag:mfe_pct_240s:limited observed rows (8)",
-    "trend_success_flag:net_pnl_pct:limited observed rows (8)",
     "trend_success_flag:net_unique_buyers_60s:limited observed rows (8)",
     "trend_success_flag:regime_confidence:limited observed rows (8)",
     "trend_success_flag:seller_reentry_ratio:limited observed rows (8)",
     "trend_success_flag:smart_wallet_dispersion_score:limited observed rows (8)",
-    "trend_success_flag:time_to_first_profit_sec:limited observed rows (8)",
-    "trend_success_flag:trend_survival_15m:limited observed rows (8)",
     "trend_success_flag:x_author_velocity_5m:limited observed rows (8)"
   ]
 }

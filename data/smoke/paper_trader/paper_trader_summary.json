@@ -1,0 +1,14 @@
+{
+  "base_position_pct": 0.5,
+  "effective_position_pct": 0.3,
+  "recommended_position_pct": 0.75,
+  "requested_effective_position_pct": 0.3,
+  "runtime_origin_tier": "canonical",
+  "runtime_signal_origin": "historical_replay",
+  "selected_artifact": "/Users/ivansbobrovs/Downloads/1solana-coin-signal-engine-main/data/smoke/paper_trader/processed/trade_feature_matrix.jsonl",
+  "sizing_origin": "historical_replay_canonical",
+  "sizing_reason_codes": [
+    "historical_replay_canonical_bridge",
+    "preserve_precomputed_effective_position_pct"
+  ]
+}
