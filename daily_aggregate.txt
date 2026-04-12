@@ -1,21 +1,21 @@
-TOKEN SECURITY AGGREGATE — 2026-04-13 00:09
+TOKEN SECURITY AGGREGATE — 2026-04-13 01:03
 ==========================================================================================
 
 Token   : So11111111111111111111111111111111111111112
 Chain   : SOLANA
-Risk    : 30/100   |   MEDIUM_RISK
-   → RUGWATCH   : Mint authority active | Freeze authority active
+Risk    : 40/100 | MEDIUM_RISK
+   → RUGWATCH : Mint/Freeze authority check pending | Basic Solana rug check
 -------------------------------------------------------------------------------------
 
 Token   : EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
 Chain   : SOLANA
-Risk    : 30/100   |   MEDIUM_RISK
-   → RUGWATCH   : Mint authority active | Freeze authority active
+Risk    : 40/100 | MEDIUM_RISK
+   → RUGWATCH : Mint/Freeze authority check pending | Basic Solana rug check
 -------------------------------------------------------------------------------------
 
 Token   : 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
 Chain   : ETHEREUM
-Risk    :  0/100   |   source_not_verified
-   → HONEYPOT   : Source code not verified on block explorer
+Risk    : 0/100 | SAFE
+   → HONEYPOT : No dangerous patterns detected
 -------------------------------------------------------------------------------------
 
