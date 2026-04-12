@@ -1,0 +1,8 @@
+python-dotenv
+pydantic
+tenacity
+cachetools
+
+jsonschema
+requests
+solana
