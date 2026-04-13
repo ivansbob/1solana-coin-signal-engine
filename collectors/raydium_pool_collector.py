@@ -81,6 +81,7 @@ def extract_pool_info(tx_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
             return {
                 "token_address": base_address,
+                "symbol": "",  # Not available in websocket data
                 "creator": creator,
                 "liquidity_sol": quote_amount,
                 "timestamp": datetime.now().isoformat(),
@@ -320,6 +321,7 @@ async def run_once():
                     if base_mint and base_mint != SOL_MINT:
                         token_data = {
                             "token_address": base_mint,
+                            "symbol": pair.get("baseToken", {}).get("symbol", "") or pair.get("symbol", ""),
                             "creator": "unknown",  # Not available in this API
                             "liquidity_sol": 0.0,  # Not available in this API
                             "timestamp": datetime.now().isoformat(),

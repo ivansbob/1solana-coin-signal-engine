@@ -75,6 +75,7 @@ async def fetch_new_tokens(session: aiohttp.ClientSession) -> List[Dict[str, Any
 
                 token_data = {
                     "token_address": token_address,
+                    "symbol": symbol,
                     "creator": "unknown",
                     "liquidity_sol": 0.0,  # Not available
                     "timestamp": datetime.now().isoformat(),
@@ -168,6 +169,7 @@ def get_recent_pools(limit: int = 50) -> List[str]:
             pools = json.load(f)
 
         # Filter by source and time
+        cutoff = datetime.now() - timedelta(hours=24)
         recent_pools = []
         for pool in pools:
             if pool.get("source") not in ["dexscreener", "pumpfun"]:

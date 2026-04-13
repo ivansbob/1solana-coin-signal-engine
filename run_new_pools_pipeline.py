@@ -123,13 +123,16 @@ async def run_pipeline(dry_run: bool = False) -> None:
     # Prepare output data
     output_lines = []
     for result in safe_tokens:
-        token_address = result.get('token_address', '')
+        mint = result.get('token_address', '')
         score = result.get('risk_score', 0)
-        liquidity = result.get('liquidity_sol', 0.0)
+        verdict = result.get('verdict', 'UNKNOWN')
+        flags = "|".join(result.get('reasons', []))
+        liq_usd = result.get('lp_liquidity_usd', 0.0)
         source = result.get('source', 'unknown')
         timestamp = result.get('timestamp', datetime.now().isoformat())
+        symbol = pool_data.get(mint, {}).get("symbol", "") or "???"
 
-        line = f"{token_address} | {score} | {liquidity} | {source} | {timestamp}"
+        line = f"{timestamp} | {mint} | {symbol} | risk={score:.1f} | verdict={verdict} | flags={flags} | liq=${liq_usd:.0f} | src={source}"
         output_lines.append(line)
 
     # Prepare data for CSV
@@ -152,10 +155,10 @@ async def run_pipeline(dry_run: bool = False) -> None:
     else:
         output_file = "data/daily_aggregate.txt"
         try:
-            with open(output_file, 'w') as f:
+            with open(output_file, 'a') as f:
                 for line in output_lines:
                     f.write(line + '\n')
-            logger.info(f"Results written to {output_file}")
+            logger.info(f"Results appended to {output_file}")
         except Exception as e:
             logger.error(f"Error writing to {output_file}: {e}")
 
@@ -171,7 +174,34 @@ async def run_pipeline(dry_run: bool = False) -> None:
         except Exception as e:
             logger.error(f"Error exporting to {csv_file}: {e}")
 
-    # Summary
+        # Append to entry candidates
+        os.makedirs("data/processed", exist_ok=True)
+        entry_file = "data/processed/entry_candidates.json"
+        try:
+            with open(entry_file, 'a') as f:
+                for result in safe_tokens:
+                    entry = result.copy()
+                    entry["discovered_at"] = datetime.now().isoformat()
+                    f.write(json.dumps(entry) + '\n')
+            logger.info(f"Entries appended to {entry_file}")
+        except Exception as e:
+            logger.error(f"Error appending to {entry_file}: {e}")
+
+    # Summary with counts
+    all_check_results = []
+    for result in results:
+        if isinstance(result, Exception):
+            continue
+        token, check_result = result
+        if check_result:
+            all_check_results.append(check_result)
+
+    pass_count = sum(1 for r in all_check_results if r.get('verdict') == 'PASS')
+    warn_count = sum(1 for r in all_check_results if r.get('verdict') == 'WARN')
+    block_count = sum(1 for r in all_check_results if r.get('verdict') == 'BLOCK')
+    honeypot_count = sum(1 for r in all_check_results if r['honeypot_data']['is_honeypot'])
+
+    logger.info(f"PASS={pass_count} WARN={warn_count} BLOCK={block_count} HONEYPOT={honeypot_count}")
     logger.info(f"Pipeline complete: Processed {len(all_tokens)} tokens, {len(safe_tokens)} safe, {len(output_lines)} aggregated")
 
 

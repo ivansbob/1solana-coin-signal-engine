@@ -4,6 +4,7 @@ import json
 import os
 from typing import Dict, Any, Optional, List
 from dotenv import load_dotenv
+from .honeypot_simulator import simulate_solana_honeypot
 
 # ==================== HONEYPOT PATTERNS FROM TEYCIR/HONEYPOTSCAN ====================
 HONEYPOT_PATTERNS = [
@@ -280,59 +281,89 @@ def rugwatch_risk_score(mint_data: Dict[str, Any], source: str = "unknown") -> D
     has_freeze = mint_data.get("has_freeze_authority", True)
     decimals = mint_data.get("decimals", 9)
 
-    # === Критические сигналы (adjusted for new tokens) ===
+    # === Критические сигналы ===
     if has_mint:
-        score += 15  # Reduced for new tokens - mint authority is common initially
-        reasons.append("Mint активен — допечать можно (нормально для новых токенов)")
+        score += 30
+        reasons.append("Mint authority active")
     else:
-        reasons.append("Mint revoked — безопасно")
+        reasons.append("Mint authority revoked (safe)")
 
-    # For new tokens, freeze authority is acceptable
-    if has_freeze and has_mint:
-        score += 10  # Reduced penalty
-        reasons.append("Freeze + Mint активны — умеренный риск")
-    elif has_freeze and not has_mint:
-        score += 5  # Minor penalty for freeze without mint
-        reasons.append("Freeze активен (Mint revoked) — умеренный риск")
+    if has_freeze:
+        score += 20
+        reasons.append("Freeze authority active")
     else:
-        reasons.append("Freeze revoked — безопасно")
+        reasons.append("Freeze authority revoked (safe)")
 
-    # === Decimals ===
+    # LP not locked
+    lp_locked = "raydium" in source.lower()  # Assume Raydium locks LP
+    if not lp_locked:
+        score += 20
+        reasons.append("LP not locked")
+
+    # Low initial liquidity
+    low_liquidity = source.lower() == "pumpfun"  # Assume Pump.fun has low liquidity initially
+    if low_liquidity:
+        score += 15
+        reasons.append("Low initial liquidity (<5 SOL)")
+
+    # Decimals weird
     if decimals > 12 or decimals < 6:
-        score += 10
-        reasons.append(f"Подозрительные decimals ({decimals})")
+        score += 5
+        reasons.append(f"Weird decimals ({decimals})")
 
     # === Бонус за низкий риск ===
     if not has_mint and not has_freeze:
         score = max(0, score - 20)  # значительный бонус за чистый токен
 
-    # Bonus for Raydium tokens (LP potentially burned)
-    if "raydium" in source.lower():
-        score -= 15
-        reasons.append("Raydium token - LP burn bonus applied (-15)")
-
     # Cap
     total_score = min(100, max(0, score))
 
-    # Статус - adjusted for new tokens
-    if total_score >= 70:
-        status = "HIGH_RISK"
-    elif total_score >= 30:
-        status = "MEDIUM_RISK"
+    # Verdict
+    if total_score < 30:
+        verdict = "PASS"
+    elif total_score < 70:
+        verdict = "WARN"
     else:
-        status = "LOW_RISK"
+        verdict = "BLOCK"
 
     return {
         "source": "rugwatch",
         "risk_score": total_score,
         "reasons": reasons,
-        "status": status,
+        "status": "HIGH_RISK" if verdict == "BLOCK" else "MEDIUM_RISK" if verdict == "WARN" else "LOW_RISK",
+        "verdict": verdict,
         "breakdown": {
-            "mint_authority": 38 if has_mint else 0,
-            "freeze_authority": 25 if has_freeze else 0,
-            "decimals": 10 if (decimals > 12 or decimals < 6) else 0
+            "mint_authority_active": 30 if has_mint else 0,
+            "freeze_authority_active": 20 if has_freeze else 0,
+            "lp_not_locked": 20 if not lp_locked else 0,
+            "low_initial_liquidity_sol": 15 if low_liquidity else 0,
+            "decimals_weird": 5 if (decimals > 12 or decimals < 6) else 0
         }
     }
+
+
+async def check_lp_info(mint: str) -> dict:
+    """
+    Получить данные о liquidity через DexScreener API.
+    Возвращает: {liquidity_usd: float, lp_locked: bool | None}
+    lp_locked=None если данных нет (failopen).
+    """
+    url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(url, timeout=10)
+            if resp.status_code != 200:
+                return {"liquidity_usd": 0.0, "lp_locked": None}
+            data = resp.json()
+            pairs = data.get("pairs") or []
+            if not pairs:
+                return {"liquidity_usd": 0.0, "lp_locked": None}
+            pair = pairs[0]
+            liquidity_usd = pair.get("liquidity", {}).get("usd", 0.0)
+            # DexScreener не возвращает lp_locked напрямую — возвращаем None
+            return {"liquidity_usd": liquidity_usd, "lp_locked": None}
+        except Exception:
+            return {"liquidity_usd": 0.0, "lp_locked": None}
 
 
 async def check_token(token_address: str, rpc_url: str = "https://api.mainnet-beta.solana.com", source: str = "unknown") -> Dict[str, Any]:
@@ -348,6 +379,10 @@ async def check_token(token_address: str, rpc_url: str = "https://api.mainnet-be
             "risk_score": 0,
             "status": "WHITELISTED",
             "reasons": ["Known safe token (whitelisted)"],
+            "verdict": "PASS",
+            "lp_liquidity_usd": 0.0,
+            "lp_locked": None,
+            "honeypot_data": {"is_honeypot": False, "confidence": 0.0, "reason": "whitelisted"},
             "raw_data": {}
         }
 
@@ -355,9 +390,45 @@ async def check_token(token_address: str, rpc_url: str = "https://api.mainnet-be
         raw_data = run_rugwatch_token_checks(rpc_url, token_address)
         risk_score = rugwatch_risk_score(raw_data, source)
         score = risk_score.get("risk_score", 100)
+        verdict = risk_score.get("verdict", "BLOCK")
 
-        # For new tokens, be more lenient - allow MEDIUM_RISK (score < 70)
-        safe = score < 70  # Allow MEDIUM_RISK for new tokens
+        # Get LP info
+        lp_info = await check_lp_info(token_address)
+        lp_liquidity_usd = lp_info["liquidity_usd"]
+        lp_locked = lp_info["lp_locked"]
+
+        # Adjust score based on LP
+        if lp_liquidity_usd < 500:
+            score += 15
+            risk_score["reasons"].append("Low initial liquidity")
+
+        if lp_locked is False:
+            score += 20
+            risk_score["reasons"].append("LP not locked")
+
+        # Recalculate verdict after adjustments
+        if score < 30:
+            verdict = "PASS"
+        elif score < 70:
+            verdict = "WARN"
+        else:
+            verdict = "BLOCK"
+
+        safe = verdict != "BLOCK"
+
+        # Honeypot check
+        honeypot_data = await simulate_solana_honeypot(token_address)
+        if honeypot_data["is_honeypot"] and honeypot_data["confidence"] > 0.7:
+            score += 40
+            risk_score["reasons"].append("Honeypot: no sells detected")
+
+            # Recalculate verdict
+            if score < 30:
+                verdict = "PASS"
+            elif score < 70:
+                verdict = "WARN"
+            else:
+                verdict = "BLOCK"
 
         return {
             "token_address": token_address,
@@ -365,6 +436,10 @@ async def check_token(token_address: str, rpc_url: str = "https://api.mainnet-be
             "risk_score": score,
             "status": risk_score.get("status", "UNKNOWN"),
             "reasons": risk_score.get("reasons", []),
+            "verdict": verdict,
+            "lp_liquidity_usd": lp_liquidity_usd,
+            "lp_locked": lp_locked,
+            "honeypot_data": honeypot_data,
             "raw_data": raw_data
         }
     except Exception as e:
@@ -372,5 +447,9 @@ async def check_token(token_address: str, rpc_url: str = "https://api.mainnet-be
             "token_address": token_address,
             "safe": False,
             "error": str(e),
-            "status": "ERROR"
+            "status": "ERROR",
+            "verdict": "BLOCK",
+            "lp_liquidity_usd": 0.0,
+            "lp_locked": None,
+            "honeypot_data": {"is_honeypot": False, "confidence": 0.0, "reason": "error"}
         }
