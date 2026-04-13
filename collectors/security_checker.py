@@ -5,6 +5,7 @@ import os
 from typing import Dict, Any, Optional, List
 from dotenv import load_dotenv
 from .honeypot_simulator import simulate_solana_honeypot
+from .known_tokens import is_known_safe
 
 # ==================== HONEYPOT PATTERNS FROM TEYCIR/HONEYPOTSCAN ====================
 HONEYPOT_PATTERNS = [
@@ -371,6 +372,21 @@ async def check_token(token_address: str, rpc_url: str = "https://api.mainnet-be
     Check if a Solana token is safe (low risk).
     Returns dict with 'safe' boolean and other details.
     """
+    # Check known safe tokens first
+    if is_known_safe(token_address):
+        return {
+            "token_address": token_address,
+            "safe": True,
+            "risk_score": 0,
+            "status": "KNOWN_SAFE",
+            "reasons": ["Known legitimate project"],
+            "verdict": "PASS",
+            "lp_liquidity_usd": 0.0,
+            "lp_locked": None,
+            "honeypot_data": {"is_honeypot": False, "confidence": 0.0, "reason": "known safe"},
+            "raw_data": {}
+        }
+
     # Check whitelist first
     if token_address in SAFE_TOKEN_WHITELIST:
         return {

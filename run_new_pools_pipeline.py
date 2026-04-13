@@ -20,6 +20,7 @@ sys.path.append(os.path.dirname(__file__))
 from collectors.raydium_pool_collector import get_recent_pools as get_raydium_pools
 from collectors.pump_fun_collector import get_recent_pools as get_pump_pools
 from collectors.security_checker import check_token
+from collectors.github_signal import get_github_dev_score
 
 # Setup logging
 logging.basicConfig(
@@ -113,6 +114,18 @@ async def run_pipeline(dry_run: bool = False) -> None:
             reason_str = " | ".join(reasons) if reasons else "Unknown"
             score = check_result.get('risk_score', 'N/A')
             logger.info(f"✗ Token {token} failed security check: {check_result.get('status', 'UNKNOWN')} (Score: {score}) (Reasons: {reason_str})")
+
+            # For WARN tokens, get GitHub dev score if symbol available
+            if check_result.get('status') == 'WARN':
+                pool_info = pool_data.get(token, {})
+                symbol = pool_info.get('symbol')
+                if symbol:
+                    try:
+                        github_score = await get_github_dev_score(symbol)
+                        check_result['github_dev_score'] = github_score
+                        logger.info(f"GitHub dev score for {token} ({symbol}): {github_score}")
+                    except Exception as e:
+                        logger.error(f"Error getting GitHub score for {token}: {e}")
 
     logger.info(f"Security checks complete: {len(safe_tokens)}/{len(all_tokens)} tokens passed")
 

@@ -264,11 +264,30 @@ async def run_collector():
         await save_pools_to_file()
 
 
-def get_recent_pools(limit: int = 50) -> List[str]:
-    """Get list of recent token addresses from the last 24 hours"""
+def get_recent_pools(limit: int = 50) -> List[Dict[str, Any]]:
+    """Get list of recent pools from the last 24 hours with full data"""
     try:
         if not os.path.exists("data/new_pools_raw.json"):
             return []
+
+        with open("data/new_pools_raw.json", 'r') as f:
+            pools = json.load(f)
+
+        # Filter by last 24 hours
+        cutoff = datetime.now() - timedelta(hours=24)
+        recent_pools = []
+        for pool in pools:
+            try:
+                pool_time = datetime.fromisoformat(pool["timestamp"])
+                if pool_time > cutoff:
+                    recent_pools.append(pool)
+            except:
+                continue
+
+        return recent_pools[:limit]
+    except Exception as e:
+        logger.error(f"Error getting recent pools: {e}")
+        return []
 
         with open("data/new_pools_raw.json", 'r') as f:
             pools = json.load(f)
