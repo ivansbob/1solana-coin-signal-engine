@@ -77,5 +77,3 @@ async def simulate_solana_honeypot(mint: str) -> Dict[str, Any]:
             "reason": "exception",
             "source": "dexscreener_heuristic"
         }
-</content>
-<parameter name="filePath">collectors/honeypot_simulator.py
