@@ -93,6 +93,7 @@ async def main():
             f"🛡️  Security checked: {len(collected_data.get('security_results', []))} tokens"
         )
         print(f"📈 GitHub repos: {len(collected_data.get('github_repos', []))} active")
+        print(f"🚀 Pump.Fun graduates: {len(collected_data.get('pump_fun_graduation_tokens', []))} high potential")
         print()
         print("💡 Copy the content from the file above to Claude/Grok/ChatGPT")
         print("🤖 Use the built-in LLM prompt at the end for analysis")

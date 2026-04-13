@@ -22,6 +22,7 @@ from .github_signal import (
 from .github_velocity_tracker import run_github_velocity_tracker
 from .new_pools import get_new_pools
 from .cross_chain_collector import get_cross_chain_pools
+from .pump_fun_collector import run_pump_fun_graduation_tracker, generate_pump_fun_coding_agent_prompt
 from .security_checker import SecurityChecker
 from .security_and_arb_checker import SecurityAndArbChecker
 from .onchain_liquidity_collector import OnchainLiquidityCollector
@@ -54,6 +55,7 @@ class FreeDiscoveryAggregator:
             self._collect_cross_chain_pools(),
             self._collect_onchain_liquidity(),
             self._collect_github_velocity(),
+            self._collect_pump_fun_graduation(),
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -65,6 +67,7 @@ class FreeDiscoveryAggregator:
             results[3] if not isinstance(results[3], Exception) else []
         )
         velocity_data = results[4] if not isinstance(results[4], Exception) else []
+        pump_fun_data = results[5] if not isinstance(results[5], Exception) else []
 
         # Basic security checks for top candidates
         security_data = await self._collect_security_checks(
@@ -86,10 +89,16 @@ class FreeDiscoveryAggregator:
             generate_coding_agent_prompt_v2(velocity_data) if velocity_data else ""
         )
 
+        # Generate Pump.Fun graduation coding agent prompt
+        pump_fun_coding_prompt = (
+            generate_pump_fun_coding_agent_prompt(pump_fun_data) if pump_fun_data else ""
+        )
+
         collected_data = {
             "timestamp": utc_now_iso(),
             "github_repos": github_data,
             "github_velocity_repos": velocity_data,
+            "pump_fun_graduation_tokens": pump_fun_data,
             "new_pools": new_pools_data[: self.max_candidates],
             "cross_chain_pools": cross_chain_data[: self.max_candidates],
             "onchain_liquidity_candidates": onchain_liquidity_data,
@@ -97,13 +106,14 @@ class FreeDiscoveryAggregator:
             "security_arb_results": security_arb_results,
             "coding_agent_prompt": coding_agent_prompt,
             "velocity_coding_agent_prompt": velocity_coding_prompt,
+            "pump_fun_coding_agent_prompt": pump_fun_coding_prompt,
         }
 
         # Save coding agent payload separately
-        self.save_coding_agent_payload(github_data, velocity_data)
+        self.save_coding_agent_payload(github_data, velocity_data, pump_fun_data)
 
         logger.info(
-            f"Collection complete: {len(github_data)} github repos, {len(velocity_data)} velocity repos, {len(new_pools_data)} new pools, {len(cross_chain_data)} cross-chain, {len(onchain_liquidity_data)} onchain liquidity, {len(security_data)} security checks, {len(security_arb_results)} security+arb checks"
+            f"Collection complete: {len(github_data)} github repos, {len(velocity_data)} velocity repos, {len(pump_fun_data)} pump_fun graduates, {len(new_pools_data)} new pools, {len(cross_chain_data)} cross-chain, {len(onchain_liquidity_data)} onchain liquidity, {len(security_data)} security checks, {len(security_arb_results)} security+arb checks"
         )
         return collected_data
 
@@ -169,6 +179,15 @@ class FreeDiscoveryAggregator:
             return velocity_data
         except Exception as e:
             logger.error(f"GitHub velocity collection failed: {e}")
+            return []
+
+    async def _collect_pump_fun_graduation(self) -> List[Dict[str, Any]]:
+        """Collect Pump.Fun graduation tracker data"""
+        try:
+            pump_fun_data = await run_pump_fun_graduation_tracker()
+            return pump_fun_data
+        except Exception as e:
+            logger.error(f"Pump.Fun graduation collection failed: {e}")
             return []
 
     async def _collect_security_checks(
@@ -286,6 +305,14 @@ class FreeDiscoveryAggregator:
             lines.append("## MULTI-VELOCITY GITHUB SIGNALS (PR-3)")
             lines.append("-" * 50)
             lines.append(velocity_prompt)
+            lines.append("")
+
+        # Pump.Fun Graduation Alpha
+        pump_fun_prompt = collected_data.get("pump_fun_coding_agent_prompt", "")
+        if pump_fun_prompt:
+            lines.append("## PUMP.FUN GRADUATION ALPHA (PR-2 2026)")
+            lines.append("-" * 50)
+            lines.append(pump_fun_prompt)
             lines.append("")
 
         # Fast Liquidity Flow
@@ -447,10 +474,10 @@ class FreeDiscoveryAggregator:
         return "\n".join(lines)
 
     def save_coding_agent_payload(
-        self, github_enriched: List[Dict[str, Any]], velocity_data: List[Dict[str, Any]]
+        self, github_enriched: List[Dict[str, Any]], velocity_data: List[Dict[str, Any]], pump_fun_data: List[Dict[str, Any]]
     ) -> None:
         """Save coding agent payload for separate processing"""
-        if not github_enriched and not velocity_data:
+        if not github_enriched and not velocity_data and not pump_fun_data:
             return
 
         timestamp = utc_now_iso()
@@ -469,6 +496,7 @@ class FreeDiscoveryAggregator:
             {
                 "github_enriched": github_enriched,
                 "velocity_candidates": velocity_data,
+                "pump_fun_candidates": pump_fun_data,
                 "timestamp": timestamp,
             },
         )

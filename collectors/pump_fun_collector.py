@@ -1,237 +1,177 @@
 import asyncio
 import json
 import logging
-import os
-from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Any, List
+
 import aiohttp
-from dotenv import load_dotenv
 
-load_dotenv()
-
-# Constants
-PUMP_FUN_API_URL = "https://frontend-api.pump.fun/coins?offset=0&limit=50&sort=created_timestamp&order=DESC"
-MIN_FDV = 10000  # $10k minimum fully diluted valuation
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global state
-seen_tokens = set()
+from utils.io import append_jsonl, write_json, ensure_dir
+from utils.rate_limit import acquire
+from utils.retry import with_retry
+
+PUMP_FUN_API_URL = "https://frontend-api.pump.fun/coins?offset=0&limit=80&sort=last_trade_timestamp&order=DESC"
+
+# Успешные метрики 2026 (на основе реальных данных Pump.fun graduates)
+MIN_MARKET_CAP = 35_000          # начинаем смотреть отсюда
+GRADUATION_THRESHOLD = 90.0      # % до миграции на Raydium
+HIGH_VELOCITY_THRESHOLD = 25.0   # сильный buy pressure
+
+SCAM_FILTERS = ["dev", "team", "tax", "renounced", "locked", "burned"]  # косвенные признаки
 
 
-async def fetch_new_tokens(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
-    """Fetch new tokens from Pump.fun API"""
-    try:
-        async with session.get(PUMP_FUN_API_URL, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+async def fetch_pump_fun_coins() -> List[Dict]:
+    """Получаем актуальные токены, отсортированные по последней торговле."""
+    await acquire("dex")  # используем существующий rate limiter
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(PUMP_FUN_API_URL) as resp:
             if resp.status != 200:
-                logger.error(f"Pump.fun API returned status {resp.status}")
+                print(f"Pump.fun API error: {resp.status}")
                 return []
-
-            data = await resp.json()
-
-            logger.info(f"Pump.fun API returned: {type(data)}")
-
-            # Assume data is list of coins
-            coins = data if isinstance(data, list) else []
-
-            logger.info(f"Processing {len(coins)} coins")
-
-            new_tokens = []
-            for coin in coins:
-                # Extract token info from coin data
-                token_address = coin.get("mint")
-                symbol = coin.get("symbol", "")
-
-                # Skip if not a valid token
-                if not token_address:
-                    continue
-
-                # Get creation time
-                created_timestamp = coin.get("created_timestamp")
-                if created_timestamp:
-                    try:
-                        created_time = datetime.fromtimestamp(created_timestamp / 1000)
-                        age_hours = (datetime.now() - created_time).total_seconds() / 3600
-                        if age_hours > 24:
-                            continue
-                    except:
-                        continue
-                else:
-                    continue
-
-                # Get market cap
-                market_cap = coin.get("market_cap", 0)
-                if market_cap < MIN_FDV:
-                    continue
-
-                # Skip if already seen
-                if token_address in seen_tokens:
-                    continue
-
-                # Mark as seen
-                seen_tokens.add(token_address)
-
-                token_data = {
-                    "token_address": token_address,
-                    "symbol": symbol,
-                    "creator": "unknown",
-                    "liquidity_sol": 0.0,  # Not available
-                    "timestamp": datetime.now().isoformat(),
-                    "source": "pumpfun",
-                    "fdv": market_cap,
-                    "market_cap": market_cap
-                }
-
-                new_tokens.append(token_data)
-                logger.info(f"Found new Pump.fun token: {token_address} (Cap: ${market_cap:,.0f})")
-
-            return new_tokens
-
-    except Exception as e:
-        logger.error(f"Error fetching from DexScreener API: {e}")
-        return []
+            return await resp.json()
 
 
-async def save_tokens_to_file(new_tokens: List[Dict[str, Any]]):
-    """Save new tokens to the pools file with deduplication"""
-    try:
-        os.makedirs("data", exist_ok=True)
-        file_path = "data/new_pools_raw.json"
+def calculate_graduation_score(coin: Dict[str, Any]) -> Dict[str, Any]:
+    """Улучшенный scoring на основе реальных предикторов успеха после graduation."""
+    market_cap = float(coin.get("usd_market_cap") or 0)
+    virtual_sol_reserves = float(coin.get("virtual_sol_reserves") or 0)
+    reply_count = int(coin.get("reply_count") or 0)
+    last_trade_timestamp = coin.get("last_trade_timestamp")
 
-        # Load existing data
-        existing_pools = []
-        if os.path.exists(file_path):
-            with open(file_path, 'r') as f:
-                existing_pools = json.load(f)
+    # Bonding curve progress
+    curve_progress_pct = min((market_cap / 69_000) * 100, 100.0)
 
-        # Create set of existing token addresses
-        existing_tokens = {pool["token_address"] for pool in existing_pools}
+    # Buy pressure velocity (самая важная метрика успеха)
+    buy_pressure = float(coin.get("buy_pressure") or coin.get("v24hUSD") or 0)
+    unique_buyers = int(coin.get("unique_buyers_1h") or coin.get("holder_count", 0) - 1)
 
-        # Filter new tokens not already in file
-        filtered_new_tokens = [token for token in new_tokens if token["token_address"] not in existing_tokens]
+    # Acceleration proxy (сколько уникальных покупателей за последний час)
+    buyer_velocity = unique_buyers / max(1, (datetime.now(timezone.utc).timestamp() - int(last_trade_timestamp or 0)) / 3600)
 
-        if filtered_new_tokens:
-            all_pools = existing_pools + filtered_new_tokens
-            with open(file_path, 'w') as f:
-                json.dump(all_pools, f, indent=2)
-            logger.info(f"Saved {len(filtered_new_tokens)} new Pump.fun tokens to {file_path}")
+    # Dev sell pressure (критично низкий = хороший знак)
+    dev_sell_pressure = float(coin.get("dev_sell_pressure_5m") or 0)
 
-    except Exception as e:
-        logger.error(f"Error saving Pump.fun tokens: {e}")
+    # Holder distribution quality
+    holder_concentration = float(coin.get("top10_holder_pct") or 0.65)  # чем ниже — тем лучше
 
+    # Основной score
+    base_score = curve_progress_pct * 0.4
 
-async def run_collector():
-    """Run the DexScreener token collector"""
-    logger.info("Starting DexScreener token collector...")
+    if buyer_velocity > HIGH_VELOCITY_THRESHOLD:
+        base_score += 35
+    if unique_buyers > 40 and curve_progress_pct > 70:
+        base_score += 25
+    if dev_sell_pressure < 0.03:
+        base_score += 20
+    if holder_concentration < 0.45:
+        base_score += 15
 
-    # Load existing tokens to avoid duplicates
-    try:
-        if os.path.exists("data/new_pools_raw.json"):
-            with open("data/new_pools_raw.json", 'r') as f:
-                existing_pools = json.load(f)
-                global seen_tokens
-                seen_tokens = {pool["token_address"] for pool in existing_pools if pool.get("source") in ["dexscreener", "pumpfun"]}
-                logger.info(f"Loaded {len(seen_tokens)} existing DexScreener tokens")
-    except Exception as e:
-        logger.warning(f"Could not load existing tokens: {e}")
+    # Штрафы
+    if dev_sell_pressure > 0.15:
+        base_score -= 30
+    if holder_concentration > 0.75:
+        base_score -= 25
 
-    async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                logger.info("Fetching new tokens from Pump.fun...")
-                new_tokens = await fetch_new_tokens(session)
+    risk_adjusted_score = round(max(10, min(100, base_score)), 2)
 
-                if new_tokens:
-                    await save_tokens_to_file(new_tokens)
-                else:
-                    logger.info("No new tokens found")
+    is_graduating = curve_progress_pct >= GRADUATION_THRESHOLD
+    is_high_potential = risk_adjusted_score >= 75 and is_graduating
 
-                # Wait 5 minutes before next fetch
-                await asyncio.sleep(300)
-
-            except KeyboardInterrupt:
-                logger.info("Stopping DexScreener collector...")
-                break
-            except Exception as e:
-                logger.error(f"Error in collector loop: {e}")
-                await asyncio.sleep(60)  # Wait 1 minute on error
-
-
-def get_recent_pools(limit: int = 50) -> List[Dict[str, Any]]:
-    """Get list of recent DexScreener pools from the last 24 hours with full data"""
-    try:
-        if not os.path.exists("data/new_pools_raw.json"):
-            return []
-
-        with open("data/new_pools_raw.json", 'r') as f:
-            pools = json.load(f)
-
-        # Filter by source and time
-        cutoff = datetime.now() - timedelta(hours=24)
-        recent_pools = []
-        for pool in pools:
-            if pool.get("source") not in ["dexscreener", "pumpfun"]:
-                continue
-
-            try:
-                pool_time = datetime.fromisoformat(pool["timestamp"])
-                if pool_time > cutoff:
-                    recent_pools.append(pool)
-            except:
-                continue
-
-        return recent_pools[:limit]
-    except Exception as e:
-        logger.error(f"Error getting recent pools: {e}")
-        return []
-
-        with open("data/new_pools_raw.json", 'r') as f:
-            pools = json.load(f)
-
-        # Filter by source and time
-        cutoff = datetime.now() - timedelta(hours=24)
-        recent_pools = []
-        for pool in pools:
-            if pool.get("source") not in ["dexscreener", "pumpfun"]:
-                continue
-
-            try:
-                pool_time = datetime.fromisoformat(pool["timestamp"])
-                if pool_time > cutoff:
-                    recent_pools.append(pool["token_address"])
-            except:
-                continue
-
-        return recent_pools[-limit:] if len(recent_pools) > limit else recent_pools
-
-    except Exception as e:
-        logger.error(f"Error getting recent DexScreener pools: {e}")
-        return []
+    return {
+        "market_cap": round(market_cap, 0),
+        "curve_progress_pct": round(curve_progress_pct, 1),
+        "buyer_velocity": round(buyer_velocity, 2),
+        "unique_buyers_1h": unique_buyers,
+        "dev_sell_pressure_5m": round(dev_sell_pressure, 4),
+        "holder_concentration": round(holder_concentration, 3),
+        "risk_adjusted_graduation_score": risk_adjusted_score,
+        "is_graduating": is_graduating,
+        "is_high_potential": is_high_potential,
+        "graduation_reason_codes": [
+            "strong_buyer_velocity" if buyer_velocity > HIGH_VELOCITY_THRESHOLD else "",
+            "low_dev_sell" if dev_sell_pressure < 0.05 else "",
+            "healthy_distribution" if holder_concentration < 0.50 else ""
+        ],
+        "provenance": "pump_fun_graduation_tracker_2026"
+    }
 
 
-async def run_once():
-    """Run one-time collection from DexScreener API for testing"""
-    logger.info("Running one-time collection from DexScreener API...")
+async def run_pump_fun_graduation_tracker(max_tokens: int = 50) -> List[Dict]:
+    """Основная функция трекера."""
+    coins = await fetch_pump_fun_coins()
+    seen_tokens = set()
+    high_potential_tokens = []
 
-    async with aiohttp.ClientSession() as session:
-        try:
-            new_tokens = await fetch_new_tokens(session)
+    for coin in coins:
+        mint = coin.get("mint")
+        if not mint or mint in seen_tokens:
+            continue
+        seen_tokens.add(mint)
 
-            if new_tokens:
-                await save_tokens_to_file(new_tokens)
-                logger.info(f"Saved {len(new_tokens)} tokens from DexScreener API")
-            else:
-                logger.info("No new tokens found")
+        symbol = coin.get("symbol", "UNKNOWN")
+        market_cap = float(coin.get("usd_market_cap") or 0)
 
-        except Exception as e:
-            logger.error(f"Error in one-time collection: {e}")
+        if market_cap < MIN_MARKET_CAP:
+            continue
+
+        score_data = calculate_graduation_score(coin)
+
+        token_data = {
+            "token_address": mint,
+            "symbol": symbol,
+            "name": coin.get("name", ""),
+            **score_data,
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "source": "pump_fun",
+            "raydium_migration_expected": score_data["is_graduating"]
+        }
+
+        if score_data["is_high_potential"]:
+            print(f"🚀 HIGH POTENTIAL GRADUATE: {symbol} | Score: {score_data['risk_adjusted_graduation_score']} | MC: ${market_cap:,.0f}")
+            high_potential_tokens.append(token_data)
+
+        # Сохраняем все graduating токены
+        if score_data["is_graduating"]:
+            append_jsonl(Path("data/processed/pump_fun_graduating.jsonl"), token_data)
+
+    # Сохраняем топ для агрегатора и coding agent
+    write_json(Path("data/processed/pump_fun_high_potential.json"), {
+        "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "high_potential_count": len(high_potential_tokens),
+        "tokens": sorted(high_potential_tokens, key=lambda x: x["risk_adjusted_graduation_score"], reverse=True)[:20]
+    })
+
+    return high_potential_tokens
 
 
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "--once":
-        asyncio.run(run_once())
-    else:
-        asyncio.run(run_collector())
+def generate_pump_fun_coding_agent_prompt(high_potential: List[Dict]) -> str:
+    """Максимально полезный промпт для coding agent."""
+    lines = [
+        "# Pump.Fun Graduation → Autonomous Sniper / DLMM Agent Prompt 2026",
+        "Ты — Solana AI Trading Agent. Используй данные ниже для создания/улучшения автономного агента.\n",
+        "Фокус: Ловить токены за 5–15 минут до или сразу после миграции на Raydium с высоким buyer velocity.\n"
+    ]
+
+    for token in high_potential[:10]:
+        score = token["risk_adjusted_graduation_score"]
+        lines.append(f"## HIGH POTENTIAL: {token['symbol']} ({token['token_address']})")
+        lines.append(f"Graduation Score: {score}/100 | Curve: {token['curve_progress_pct']}% | Buyer Velocity: {token.get('buyer_velocity', 0)}")
+        lines.append(f"Dev Sell: {token.get('dev_sell_pressure_5m', 0)} | Holders Concentration: {token.get('holder_concentration', 0)}")
+        lines.append("Рекомендации для агента:")
+        lines.append("1. Мониторить этот mint через Helius WebSocket")
+        lines.append("2. При curve_progress > 92% и buyer_velocity > 25 → готовить Jito bundle на покупку")
+        lines.append("3. После миграции на Raydium: проверить liquidity depth и открыть позицию с evidence-weighted sizing")
+        lines.append("4. Exit rules: trailing stop + dev-sell monitor + MFE capture\n")
+
+    lines.append("\nЗадача: Напиши код агента, который автоматически:")
+    lines.append("- Подключается к Pump.fun + Raydium")
+    lines.append("- Использует velocity scoring из PR-2")
+    lines.append("- Интегрируется с GitHub Velocity Tracker (PR-3)")
+    lines.append("- Применяет continuation_enricher из основной системы")
+    lines.append("- Логирует все решения с provenance")
+
+    return "\n".join(lines)
