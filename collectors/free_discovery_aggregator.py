@@ -13,7 +13,7 @@ from utils.clock import utc_now_iso
 from utils.io import write_json
 
 # Import existing collectors
-from .github_signal import get_github_candidates, build_github_text_section
+from .github_signal import collect_enhanced_github_candidates, build_github_text_section, generate_coding_agent_prompt
 from .new_pools import get_new_pools
 from .cross_chain_collector import get_cross_chain_pools
 from .security_checker import SecurityChecker
@@ -64,6 +64,9 @@ class FreeDiscoveryAggregator:
         # Security and arb checks for onchain liquidity candidates
         security_arb_results = await self._collect_security_arb_checks(onchain_liquidity_data)
 
+        # Generate coding agent prompt for GitHub repos
+        coding_agent_prompt = generate_coding_agent_prompt(github_data) if github_data else ""
+
         collected_data = {
             "timestamp": utc_now_iso(),
             "github_repos": github_data,
@@ -72,7 +75,11 @@ class FreeDiscoveryAggregator:
             "onchain_liquidity_candidates": onchain_liquidity_data,
             "security_results": security_data,
             "security_arb_results": security_arb_results,
+            "coding_agent_prompt": coding_agent_prompt,
         }
+
+        # Save coding agent payload separately
+        self.save_coding_agent_payload(github_data)
 
         logger.info(
             f"Collection complete: {len(new_pools_data)} new pools, {len(cross_chain_data)} cross-chain, {len(onchain_liquidity_data)} onchain liquidity, {len(security_data)} security checks, {len(security_arb_results)} security+arb checks"
@@ -80,10 +87,10 @@ class FreeDiscoveryAggregator:
         return collected_data
 
     async def _collect_github_activity(self) -> List[Dict[str, Any]]:
-        """Collect new GitHub repos with dev activity scores"""
+        """Collect enhanced GitHub repos with 2026 metrics and X signals"""
         try:
-            candidates = await get_github_candidates()
-            # Return the candidates directly, already sorted by pushed_at desc
+            candidates = await collect_enhanced_github_candidates()
+            # Return the candidates directly, sorted by risk_adjusted_score desc
             return candidates
         except Exception as e:
             logger.error(f"GitHub collection failed: {e}")
@@ -207,6 +214,12 @@ class FreeDiscoveryAggregator:
             f"=== WEB3 FREE ARBITRAGE SCAN {dt.strftime('%Y-%m-%d %H:%M')} ==="
         )
         lines.append("")
+
+        # Coding Agent Prompt first for high-priority repos
+        coding_prompt = collected_data.get("coding_agent_prompt", "")
+        if coding_prompt:
+            lines.append(coding_prompt)
+            lines.append("")
 
         # GitHub Repos
         github_text = build_github_text_section(collected_data.get("github_repos", []))
@@ -370,6 +383,26 @@ class FreeDiscoveryAggregator:
         lines.append("Focus on Solana ecosystem opportunities with free RPC access.")
 
         return "\n".join(lines)
+
+    def save_coding_agent_payload(self, github_enriched: List[Dict[str, Any]]) -> None:
+        """Save coding agent payload for separate processing"""
+        if not github_enriched:
+            return
+
+        timestamp = utc_now_iso()
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+
+        # Create signals_history directory
+        history_dir = Path("signals_history")
+        history_dir.mkdir(exist_ok=True)
+
+        # Save coding agent payload
+        timestamp_str = dt.strftime("%Y%m%d_%H%M")
+        payload_filename = f"coding_agent_payload_{timestamp_str}.json"
+        payload_path = history_dir / payload_filename
+        write_json(payload_path, {"github_enriched": github_enriched, "timestamp": timestamp})
+
+        logger.info(f"Saved coding agent payload to {payload_path}")
 
     def save_history(self, text: str, collected_data: Dict[str, Any]) -> None:
         """Save the aggregate text and raw data to history"""

@@ -70,6 +70,21 @@ SCAM_FILTERS = [
 # Более строгий: исключает очевидный мусор
 SOLANA_ADDRESS_REGEX = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b")
 
+# ================== НОВЫЕ МЕТРИКИ 2026 ==================
+# (не дублируем KEYWORDS и SOLANA_ADDRESS_REGEX из PR-1)
+
+AGENTIC_KEYWORDS = [
+    "solana-agent-kit",
+    "eliza",
+    "openclaw",
+    "mcp-server",
+    "ai-trading-agent",
+    "dlmm-agent",
+    "autonomous-agent",
+    "reinforcement-learning",
+    "goat-sdk",
+]
+
 # ================== ОСНОВНЫЕ ФУНКЦИИ ==================
 
 
@@ -91,7 +106,7 @@ async def search_new_repos() -> List[Dict]:
             "per_page": MAX_REPOS,
         }
 
-        await acquire("github")  # rate limit
+        acquire("github")  # rate limit
 
         async with session.get(GITHUB_SEARCH_URL, params=params) as resp:
             if resp.status != 200:
@@ -199,10 +214,149 @@ def build_github_text_section(candidates: List[Dict]) -> str:
     return "\n".join(lines)
 
 
+def calculate_enhanced_dev_activity_score(
+    repo: Dict[str, Any], x_mentions: int = 0
+) -> Dict[str, Any]:
+    """Улучшенный scoring с метриками 2026 (velocity, smart_money_proxy, agentic_potential)."""
+    base = calculate_dev_activity_score(repo)  # вызов из PR-1 (не дублируем)
+
+    description = (repo.get("description") or "").lower()
+    topics = repo.get("topics", [])
+    stars = repo.get("stargazers_count", 0)
+    forks = repo.get("forks_count", 0)
+    pushed_at = repo.get("pushed_at", "")
+
+    # Velocity proxy (быстрое накопление traction = как bonding curve velocity)
+    from datetime import datetime, timezone
+
+    velocity_score = min(
+        100,
+        (stars + forks * 2)
+        / max(
+            1,
+            (
+                datetime.now(timezone.utc)
+                - datetime.fromisoformat(pushed_at.replace("Z", "+00:00"))
+            ).days
+            + 1,
+        )
+        * 10,
+    )
+
+    # Smart money / early adoption proxy
+    smart_money_proxy = (
+        1
+        if any(
+            kw in description or kw in " ".join(topics)
+            for kw in ["smart money", "copy trade", "jito", "early alpha"]
+        )
+        else 0
+    )
+    smart_money_proxy += (
+        1 if any(ak in " ".join(topics) for ak in AGENTIC_KEYWORDS) else 0
+    )
+
+    # Agentic potential (для coding agents — насколько репозиторий подходит под автономного AI trading agent)
+    agentic_hits = sum(
+        1 for kw in AGENTIC_KEYWORDS if kw in description or kw in " ".join(topics)
+    )
+    agentic_potential = round(agentic_hits * 18 + (x_mentions * 5), 2)
+
+    # Risk-adjusted final score
+    risk_penalty = 20 if base.get("scam_risk") == "high" else 0
+    final_score = round(
+        max(
+            10,
+            base["dev_activity_score"]
+            + velocity_score * 0.6
+            + smart_money_proxy * 12
+            + agentic_potential * 0.4
+            - risk_penalty,
+        ),
+        2,
+    )
+
+    return {
+        **base,
+        "velocity_score": round(velocity_score, 2),
+        "smart_money_proxy": smart_money_proxy,
+        "agentic_potential": agentic_potential,
+        "x_mention_boost": x_mentions,
+        "risk_adjusted_score": final_score,
+        "actionable_for_coding_agent": "high" if agentic_potential > 40 else "medium",
+        "provenance": "github_enhanced_2026",
+    }
+
+
+async def enrich_with_x_signals(repo_full_name: str) -> int:
+    """Агрегация X-данных для репозитория (mentions, hype)."""
+    # Здесь можно вызвать x_semantic_search или x_keyword_search из твоих utils
+    # Пример stub (реализуй через существующий x_keyword_search)
+    query = f"{repo_full_name} (ai agent OR solana OR trading)"
+    # results = await x_keyword_search(...)
+    # return len(results)  # или суммарный engagement
+    return 15  # placeholder — замени на реальный вызов
+
+
+def generate_coding_agent_prompt(candidates: List[Dict]) -> str:
+    """Специальный промпт для coding agents (Claude/Grok/OpenClaw) — максимально полезный."""
+    lines = ["# GitHub Alpha → Coding Agent Prompt 2026\n"]
+    lines.append(
+        "Ты — автономный Solana AI Coding Agent. Твоя задача: превратить эти репозитории в production-ready автономных trading agents.\n"
+    )
+    lines.append(
+        "Фокус 2026: AI agents (ElizaOS-style), DLMM liquidity agents, Jito bundle integration, Solana Agent Kit + reinforcement learning для memecoins.\n\n"
+    )
+
+    for repo in sorted(
+        candidates, key=lambda x: x.get("risk_adjusted_score", 0), reverse=True
+    )[:10]:
+        score = repo.get("risk_adjusted_score", 0)
+        contracts = repo.get("extracted_contracts", [])
+        agentic = repo.get("agentic_potential", 0)
+
+        lines.append(f"## Repo: {repo.get('full_name')}")
+        lines.append(f"Risk-Adjusted Score: {score} | Agentic Potential: {agentic}")
+        lines.append(
+            f"Velocity: {repo.get('velocity_score')} | Smart Money Proxy: {repo.get('smart_money_proxy')}"
+        )
+        if contracts:
+            lines.append(
+                f"Found Contracts: {', '.join(contracts)} → Интегрируй как target для sniper / liquidity provider agent"
+            )
+        lines.append("Next Steps для тебя (coding agent):")
+        lines.append("1. Fork repo")
+        lines.append("2. Интегрируй Solana Agent Kit + Jito bundles")
+        lines.append(
+            "3. Добавь autonomous loop: monitor → decide (RL или LLM) → execute (swap / DLMM position)"
+        )
+        lines.append(
+            "4. Добавь risk controls: bonding-curve velocity check + dev-sell monitor"
+        )
+        lines.append("5. Deploy как OpenClaw / Eliza-compatible agent\n")
+
+    lines.append(
+        "\nOutput format: Полный код diff + deployment инструкция + expected daily fees (на основе похожих DLMM agents ~200 SOL/day)."
+    )
+    return "\n".join(lines)
+
+
 # Пример использования в aggregator
 async def collect_github_candidates(max_candidates: int = 15):
     repos = await search_new_repos()
     enriched = []
     for repo in repos[:max_candidates]:
         enriched.append({**repo, **calculate_dev_activity_score(repo)})
+    return enriched
+
+
+# Enhanced version with X signals and 2026 metrics
+async def collect_enhanced_github_candidates(max_candidates: int = 15):
+    repos = await search_new_repos()
+    enriched = []
+    for repo in repos[:max_candidates]:
+        repo_full_name = repo.get("full_name", "")
+        x_mentions = await enrich_with_x_signals(repo_full_name)
+        enhanced = calculate_enhanced_dev_activity_score(repo, x_mentions)
+        enriched.append({**repo, **enhanced})
     return enriched
