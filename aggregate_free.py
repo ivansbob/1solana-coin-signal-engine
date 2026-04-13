@@ -7,7 +7,7 @@ import asyncio
 import argparse
 import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from collectors.free_discovery_aggregator import FreeDiscoveryAggregator
@@ -88,13 +88,45 @@ async def main():
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(aggregate_text)
 
-        print(f"\n{'='*90}")
-        print("FREE DISCOVERY AGGREGATOR + MOON SCORE COMPLETE")
-        print(f"{'='*90}")
-        print(f"📄 Saved: {output_file.absolute()}")
-        print(f"🚀 High Moon Score tokens: {len([t for t in collected_data.get('new_pools', []) if t.get('moon_score', 0) >= 70])}")
-        print(f"💡 Ready for LLM analysis or direct feeding to coding agent")
-        print(f"{'='*90}\n")
+        # ====================== LLM OPTIMIZER PROMPT (PR-5) ======================
+        print("\n" + "="*95)
+        print("💡 ГОТОВО ДЛЯ LLM АНАЛИЗА — СКОПИРУЙ ВЕСЬ ФАЙЛ И ВСТАВЬ В ЧАТ")
+        print("="*95)
+        print("\nСкопируй **всё содержимое** файла и вставь после следующего системного промпта:\n")
+
+        print("=== СИСТЕМНЫЙ ПРОМПТ (вставь первым) ===")
+        print("""Ты — Solana Tier-1 Alpha Scout (AI-агент хедж-фонда).
+Твоя задача: анализировать ежедневный free discovery aggregate.
+
+ПРАВИЛА (строго соблюдай):
+1. Игнорируй любой скам, rug, высокий dev-sell, концентрацию холдеров >75%.
+2. Приоритизируй токены с moon_score >= 45 ИЛИ is_graduating=True ИЛИ arb_score >= 60.
+3. Анализируй Moon Score, GitHub velocity, buyer velocity, liquidity inflow, cross-chain presence.
+4. Выводи ТОЛЬКО чистый JSON-массив. Никакого Markdown, никакого объяснения, никакого дополнительного текста до или после JSON.
+5. Если ничего достойного — верни пустой массив [].
+
+Структура каждого объекта:
+{
+  "symbol": string,
+  "token_address": string,
+  "moon_score": number,
+  "arb_score": number | null,
+  "curve_progress": number | null,
+  "action": "BUY" | "SCALP" | "ARB" | "WATCH" | "IGNORE",
+  "confidence": "HIGH" | "MEDIUM" | "LOW",
+  "reason": string (коротко, 8-15 слов),
+  "risk_level": "LOW" | "MEDIUM" | "HIGH",
+  "suggested_position_pct": number (0-5),
+  "tags": array of strings (например ["graduating", "ai-agent", "high-velocity"])
+}
+
+Выведи только JSON.""")
+        print("====================================\n")
+
+        print(f"📄 Файл готов: {output_file.absolute()}")
+        print("✅ Просто скопируй всё содержимое файла и вставь в Claude / ChatGPT / Grok после промпта выше.")
+        print("🎯 Модель вернёт чистый JSON, который можно сразу парсить и отправлять в trading engine.\n")
+        print("="*95)
 
     except Exception as e:
         logger.error(f"Aggregation failed: {e}")

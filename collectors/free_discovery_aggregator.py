@@ -288,6 +288,14 @@ class FreeDiscoveryAggregator:
         )
         lines.append("")
 
+        # Add header for cleaner LLM input
+        lines.append("# Solana Free Discovery Aggregate + Moon Score")
+        lines.append(f"Generated at: {datetime.now(timezone.utc).isoformat()}")
+        lines.append("")
+        lines.append("Top tokens sorted by Moon Score descending.")
+        lines.append("Only tokens with Moon Score > 30 or graduating are worth attention.")
+        lines.append("")
+
         # Coding Agent Prompt first for high-priority repos
         coding_prompt = collected_data.get("coding_agent_prompt", "")
         if coding_prompt:
