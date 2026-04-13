@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Free Discovery Aggregator - Level 1-2 Pipeline
-Collects data from free sources and builds daily aggregate for LLM analysis.
+Free Discovery Aggregator - Level 1-2 Pipeline (улучшенная версия)
 """
 
 import asyncio
 import argparse
 import logging
-import os
 from pathlib import Path
+from datetime import datetime
 from dotenv import load_dotenv
 
 from collectors.free_discovery_aggregator import FreeDiscoveryAggregator
+from collectors.moon_score_engine import calculate_moon_score   # ← Новый импорт
 
 # Setup logging
 logging.basicConfig(
@@ -21,83 +21,77 @@ logger = logging.getLogger(__name__)
 
 
 async def main():
-    """Main entry point"""
-    parser = argparse.ArgumentParser(description="Free Discovery Aggregator")
-    parser.add_argument(
-        "--max-candidates",
-        type=int,
-        default=25,
-        help="Maximum number of candidates to process (default: 25)",
-    )
-    parser.add_argument(
-        "--save-history",
-        action="store_true",
-        default=True,
-        help="Save results to signals_history/ directory (default: True)",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default=".",
-        help="Output directory for aggregate file (default: current directory)",
-    )
+    parser = argparse.ArgumentParser(description="Free Discovery Aggregator with Moon Score")
+    parser.add_argument("--max-candidates", type=int, default=30, help="Maximum candidates to process")
+    parser.add_argument("--save-history", action="store_true", default=True)
+    parser.add_argument("--output-dir", type=str, default=".")
 
     args = parser.parse_args()
-
-    # Load environment variables
     load_dotenv()
 
-    logger.info(
-        f"Starting free discovery aggregation (max_candidates={args.max_candidates})"
-    )
+    logger.info(f"Starting Free Discovery Aggregation with Moon Score Engine (max={args.max_candidates})")
 
-    # Create aggregator
     aggregator = FreeDiscoveryAggregator(max_candidates=args.max_candidates)
 
     try:
-        # Collect all data
         collected_data = await aggregator.collect_all()
 
-        # Build aggregate text
+        # ====================== MOON SCORE ENGINE ======================
+        if "new_pools" in collected_data and collected_data["new_pools"]:
+            logger.info(f"Applying Moon Score to {len(collected_data['new_pools'])} tokens...")
+
+            scored_pools = []
+            for token in collected_data["new_pools"]:
+                scored = calculate_moon_score(token)
+                scored_pools.append(scored)
+
+            # Сортируем по Moon Score (самые горячие сверху)
+            collected_data["new_pools"] = sorted(
+                scored_pools,
+                key=lambda x: x.get("moon_score", 0),
+                reverse=True
+            )
+
+            high_moon = [t for t in collected_data["new_pools"] if t.get("moon_score", 0) >= 70]
+            logger.info(f"Found {len(high_moon)} high-potential tokens (Moon Score ≥ 70)")
+
+        # ====================== BUILD AGGREGATE TEXT ======================
         aggregate_text = await aggregator.build_aggregate_text(collected_data)
 
-        # Save to history if requested
+        # Добавляем Moon Score Summary в начало отчёта
+        moon_summary = "\n## MOON SCORE SUMMARY (Zero-LLM Heuristic)\n"
+        moon_summary += f"Total tokens analyzed: {len(collected_data.get('new_pools', []))}\n"
+        moon_summary += f"High Moon Score (≥70): {len([t for t in collected_data.get('new_pools', []) if t.get('moon_score', 0) >= 70])}\n\n"
+        aggregate_text = moon_summary + aggregate_text
+
+        # ====================== BUILD AGGREGATE TEXT ======================
+        aggregate_text = await aggregator.build_aggregate_text(collected_data)
+
+        # Добавляем Moon Score Summary в начало отчёта
+        moon_summary = "\n## MOON SCORE SUMMARY (Zero-LLM Heuristic)\n"
+        moon_summary += f"Total tokens analyzed: {len(collected_data.get('new_pools', []))}\n"
+        moon_summary += f"High Moon Score (≥70): {len([t for t in collected_data.get('new_pools', []) if t.get('moon_score', 0) >= 70])}\n\n"
+        aggregate_text = moon_summary + aggregate_text
+
+        # ====================== SAVE HISTORY AND OUTPUT ======================
         if args.save_history:
             aggregator.save_history(aggregate_text, collected_data)
 
-        # Also save to output directory
         output_dir = Path(args.output_dir)
         output_dir.mkdir(exist_ok=True)
-
-        timestamp = collected_data.get("timestamp", "unknown")
-        dt_str = (
-            timestamp.replace("T", "_")
-            .replace(":", "")
-            .replace("-", "")
-            .replace("Z", "")[:15]
-        )
-        output_file = output_dir / f"daily_aggregate_{dt_str}.txt"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = output_dir / f"daily_aggregate_moon_{timestamp}.txt"
 
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(aggregate_text)
 
-        print(f"\n{'='*80}")
-        print("FREE DISCOVERY AGGREGATE COMPLETE")
-        print(f"{'='*80}")
-        print(f"📄 File saved: {output_file.absolute()}")
-        print(f"📊 Processed {len(collected_data.get('new_pools', []))} new pools")
-        print(
-            f"🌐 Found {len(collected_data.get('cross_chain_pools', []))} cross-chain opportunities"
-        )
-        print(
-            f"🛡️  Security checked: {len(collected_data.get('security_results', []))} tokens"
-        )
-        print(f"📈 GitHub repos: {len(collected_data.get('github_repos', []))} active")
-        print(f"🚀 Pump.Fun graduates: {len(collected_data.get('pump_fun_graduation_tokens', []))} high potential")
-        print()
-        print("💡 Copy the content from the file above to Claude/Grok/ChatGPT")
-        print("🤖 Use the built-in LLM prompt at the end for analysis")
-        print(f"{'='*80}\n")
+        print(f"\n{'='*90}")
+        print("FREE DISCOVERY AGGREGATOR + MOON SCORE COMPLETE")
+        print(f"{'='*90}")
+        print(f"📄 Saved: {output_file.absolute()}")
+        print(f"🚀 High Moon Score tokens: {len([t for t in collected_data.get('new_pools', []) if t.get('moon_score', 0) >= 70])}")
+        print(f"💡 Ready for LLM analysis or direct feeding to coding agent")
+        print(f"{'='*90}\n")
 
     except Exception as e:
         logger.error(f"Aggregation failed: {e}")
