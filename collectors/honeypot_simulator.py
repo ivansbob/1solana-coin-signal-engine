@@ -6,6 +6,14 @@ from typing import Dict, Any
 logger = logging.getLogger(__name__)
 
 
+async def check_honeypot(token_address: str, chain: str = "solana") -> Dict[str, Any]:
+    """
+    Check if token is a honeypot.
+    For Solana, uses DexScreener heuristic.
+    """
+    return await simulate_solana_honeypot(token_address)
+
+
 async def simulate_solana_honeypot(mint: str) -> Dict[str, Any]:
     """
     Эвристическая honeypot проверка для Solana токенов.

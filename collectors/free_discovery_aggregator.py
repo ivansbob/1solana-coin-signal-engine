@@ -14,13 +14,9 @@ from utils.io import write_json
 
 # Import existing collectors
 from .github_signal import get_github_candidates, build_github_text_section
-from .new_pools import get_new_tokens
-from .cross_chain_collector import get_new_pools_all_chains
-from .security_checker import (
-    run_rugwatch_token_checks,
-    rugwatch_risk_score,
-    honeypot_check_teycir,
-)
+from .new_pools import get_new_pools
+from .cross_chain_collector import get_cross_chain_pools
+from .security_checker import SecurityChecker
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +83,7 @@ class FreeDiscoveryAggregator:
         """Collect new pools from free sources"""
         try:
             # Get from DexScreener (Solana) - main free source
-            solana_pools = await get_new_tokens()
+            solana_pools = await get_new_pools()
 
             # Deduplicate by token_address
             seen = set()
@@ -112,7 +108,7 @@ class FreeDiscoveryAggregator:
     async def _collect_cross_chain_pools(self) -> List[Dict[str, Any]]:
         """Collect cross-chain opportunities"""
         try:
-            return await get_new_pools_all_chains(min_liquidity=5000)
+            return await get_cross_chain_pools(min_liquidity=5000)
         except Exception as e:
             logger.error(f"Cross-chain collection failed: {e}")
             return []
@@ -121,52 +117,32 @@ class FreeDiscoveryAggregator:
         self, pools: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """Basic security checks for top pools"""
-        security_results = []
+        security_checker = SecurityChecker()
+        token_addresses = [pool.get("token_address", "") for pool in pools if pool.get("token_address")]
 
-        for pool in pools:
-            token_addr = pool.get("token_address", "")
-            if not token_addr:
-                continue
+        if not token_addresses:
+            return []
 
-            try:
-                # For Solana tokens, use rugwatch
-                if (
-                    token_addr.startswith("EPj") or len(token_addr) == 44
-                ):  # Solana address heuristic
-                    raw_check = run_rugwatch_token_checks(mint_str=token_addr)
-                    risk_score = rugwatch_risk_score(raw_check)
-                else:
-                    # For EVM tokens, try honeypot check (limited by API key)
-                    raw_check = honeypot_check_teycir(token_addr)
-                    risk_score = {
-                        "risk_score": raw_check.get("risk_score", 0),
-                        "status": raw_check.get("status", "UNKNOWN"),
-                        "reasons": raw_check.get("reasons", []),
-                    }
-
-                security_results.append(
-                    {
-                        "token_address": token_addr,
-                        "symbol": pool.get("symbol", "UNKNOWN"),
-                        "risk_score": risk_score.get("risk_score", 0),
-                        "status": risk_score.get("status", "UNKNOWN"),
-                        "reasons": risk_score.get("reasons", []),
-                    }
-                )
-
-            except Exception as e:
-                logger.warning(f"Security check failed for {token_addr}: {e}")
-                security_results.append(
-                    {
-                        "token_address": token_addr,
-                        "symbol": pool.get("symbol", "UNKNOWN"),
-                        "risk_score": 50,
-                        "status": "CHECK_FAILED",
-                        "reasons": [f"Security check error: {str(e)[:50]}"],
-                    }
-                )
-
-        return security_results
+        try:
+            security_results = await security_checker.check_batch(token_addresses, chain="solana")
+            return security_results
+        except Exception as e:
+            logger.warning(f"Batch security check failed: {e}")
+            # Return error results for all tokens
+            return [
+                {
+                    "token_address": addr,
+                    "symbol": next((pool.get("symbol", "UNKNOWN") for pool in pools if pool.get("token_address") == addr), "UNKNOWN"),
+                    "honeypot": False,
+                    "rug_score": 10.0,
+                    "risk_level": "HIGH",
+                    "verdict": "BLOCK",
+                    "reasons": [f"Security check error: {str(e)[:50]}"],
+                    "solana_specific": {},
+                    "checked_at": utc_now_iso(),
+                }
+                for addr in token_addresses
+            ]
 
     def build_aggregate_text(self, collected_data: Dict[str, Any]) -> str:
         """Build the beautiful daily aggregate text"""

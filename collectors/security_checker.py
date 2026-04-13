@@ -1,471 +1,103 @@
-import httpx
-import re
-import json
-import os
-from typing import Dict, Any, Optional, List
-from dotenv import load_dotenv
-from .honeypot_simulator import simulate_solana_honeypot
-from .known_tokens import is_known_safe
-
-# ==================== HONEYPOT PATTERNS FROM TEYCIR/HONEYPOTSCAN ====================
-HONEYPOT_PATTERNS = [
-    {"name": "balance_tx_origin", "regex": re.compile(r'function\s+balanceOf[^}]{0,500}(?:tx\.origin|origin\(\))', re.DOTALL | re.IGNORECASE)},
-    {"name": "allowance_tx_origin", "regex": re.compile(r'function\s+allowance[^}]{0,500}(?:tx\.origin|origin\(\))', re.DOTALL | re.IGNORECASE)},
-    {"name": "transfer_tx_origin", "regex": re.compile(r'function\s+transfer[^}]{0,500}(?:tx\.origin|origin\(\))', re.DOTALL | re.IGNORECASE)},
-    {"name": "hidden_fee_taxPayer", "regex": re.compile(r'function\s+_taxPayer[^}]{0,300}(?:tx\.origin|origin\(\))', re.DOTALL | re.IGNORECASE)},
-    {"name": "isSuper_tx_origin", "regex": re.compile(r'function\s+_isSuper[^}]{0,200}(?:tx\.origin|origin\(\))', re.DOTALL | re.IGNORECASE)},
-    {"name": "tx_origin_require", "regex": re.compile(r'require\s*\(\s*[^)]{0,500}?tx\.origin', re.DOTALL | re.IGNORECASE)},
-    {"name": "tx_origin_if_auth", "regex": re.compile(r'if\s*\(\s*[^)]{0,200}?tx\.origin\s*[!=]=[^)]{0,200}?\)\s*(?:revert|require)', re.DOTALL | re.IGNORECASE)},
-    {"name": "tx_origin_assert", "regex": re.compile(r'assert\s*\(\s*[^)]{0,200}?tx\.origin', re.DOTALL | re.IGNORECASE)},
-    {"name": "tx_origin_mapping", "regex": re.compile(r'\[\s*tx\.origin\s*\]\s*=', re.DOTALL | re.IGNORECASE)},
-    {"name": "sell_block_pattern", "regex": re.compile(r'if\s*\(\s*_isSuper\s*\(\s*recipient\s*\)\s*\)\s*return\s+false', re.DOTALL | re.IGNORECASE)},
-    {"name": "asymmetric_transfer_logic", "regex": re.compile(r'function\s+_canTransfer[^}]{0,500}return\s+false', re.DOTALL | re.IGNORECASE)},
-    {"name": "transfer_whitelist_only", "regex": re.compile(r'require\s*\(\s*_whitelist\[[^\]]{0,200}\]\s*\|\|\s*_whitelist\[[^\]]{0,200}\]\s*,', re.DOTALL | re.IGNORECASE)},
-    {"name": "hidden_sell_tax", "regex": re.compile(r'if\s*\([^)]{0,200}pair[^)]{0,200}\)[^{]{0,500}\{[^}]{0,500}sellTax\s*=\s*(?:100|99|98|97|96|95)', re.DOTALL | re.IGNORECASE)},
-]
-
-MIN_PATTERNS_FOR_DETECTION = 2
-
-
-def parse_source_code(source_code: str) -> str:
-    normalized = source_code.strip()
-    if normalized.startswith('{{') and normalized.endswith('}}'):
-        normalized = normalized[1:-1]
-
-    if normalized.startswith('{'):
-        try:
-            data = json.loads(normalized)
-            if isinstance(data, dict) and 'sources' in data:
-                combined = ''
-                for filename, file_obj in data.get('sources', {}).items():
-                    content = file_obj.get('content') if isinstance(file_obj, dict) else None
-                    if content:
-                        combined += f"// File: {filename}\n{content}\n\n"
-                return combined if combined else source_code
-        except Exception:
-            pass
-    return source_code
-
-
-def detect_honeypot(source_code: str) -> Dict[str, Any]:
-    if not source_code or len(source_code) < 50:
-        return {"is_honeypot": False, "matched_count": 0, "patterns": [], "risk_score": 0}
-
-    source_code = source_code[:500 * 1024]
-
-    matches: List[Dict] = []
-    for p in HONEYPOT_PATTERNS:
-        try:
-            for match in p["regex"].finditer(source_code):
-                line = source_code[:match.start()].count('\n') + 1
-                matches.append({
-                    "name": p["name"],
-                    "line": line,
-                    "snippet": match.group(0)[:120]
-                })
-        except Exception:
-            continue
-
-    is_honeypot = len(matches) >= MIN_PATTERNS_FOR_DETECTION
-    risk_score = min(10, len(matches) * 3)
-
-    return {
-        "is_honeypot": is_honeypot,
-        "matched_count": len(matches),
-        "patterns": matches[:15],
-        "risk_score": risk_score,
-        "status": "HONEYPOT" if is_honeypot else "SUSPICIOUS" if matches else "SAFE"
-    }
-
-
-async def fetch_contract_source(address: str, chain: str = "ethereum", etherscan_api_key: str = "") -> Optional[str]:
-    chain_configs = {
-        "ethereum": 1, "eth": 1,
-        "polygon": 137, "matic": 137,
-        "arbitrum": 42161, "arb": 42161,
-        "bnb": 56, "bsc": 56,
-        "base": 8453,
-        "optimism": 10, "op": 10,
-        "avalanche": 43114, "avax": 43114,
-        "fantom": 250, "ftm": 250,
-    }
-
-    chain_lower = chain.lower().strip()
-    chain_id = chain_configs.get(chain_lower)
-    if not chain_id:
-        return None
-
-    url = f"https://api.etherscan.io/v2/api?chainid={chain_id}&module=contract&action=getsourcecode&address={address}"
-    if etherscan_api_key:
-        url += f"&apikey={etherscan_api_key}"
-
-    async with httpx.AsyncClient() as client:
-        try:
-            resp = await client.get(url, timeout=15)
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            if str(data.get("status")) != "1" or not data.get("result"):
-                return None
-
-            result = data["result"][0]
-            source = result.get("SourceCode")
-            if not source:
-                return None
-
-            return parse_source_code(source)
-        except Exception:
-            return None
-
-
-async def honeypot_check_teycir(
-    token_address: str,
-    chain: str = "ethereum",
-    etherscan_api_key: str = ""
-) -> Dict[str, Any]:
-    load_dotenv()
-    if not etherscan_api_key:
-        etherscan_api_key = os.getenv("ETHERSCAN_API_KEY", "")
-
-    result: Dict[str, Any] = {
-        "source": "teycir_honeypotscan",
-        "token_address": token_address.lower(),
-        "chain": chain,
-        "is_honeypot": False,
-        "risk_score": 0,
-        "reasons": [],
-        "status": "unknown",
-        "matched_patterns": []
-    }
-
-    try:
-        source_code = await fetch_contract_source(token_address, chain, etherscan_api_key)
-
-        if not source_code:
-            result.update({
-                "status": "source_not_verified",
-                "reasons": ["Source code not verified on block explorer"]
-            })
-            return result
-
-        detection = detect_honeypot(source_code)
-
-        result.update({
-            "is_honeypot": detection["is_honeypot"],
-            "risk_score": detection["risk_score"],
-            "matched_patterns": [p["name"] for p in detection["patterns"]],
-            "status": detection["status"],
-            "reasons": [f"Matched {len(detection['patterns'])} honeypot patterns"] if detection["patterns"] else ["No dangerous patterns detected"]
-        })
-    except Exception as e:
-        result.update({
-            "status": "error",
-            "reasons": [f"Scan error: {str(e)[:120]}"]
-        })
-
-    return result
-
-
-if __name__ == "__main__":
-    import json
-    from .security_checker import run_rugwatch_token_checks
-    key = os.getenv("ETHERSCAN_API_KEY", "")
-    test_addr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"  # USDC
-    result = honeypot_check_teycir(test_addr, chain="ethereum", etherscan_api_key=key)
-    print(json.dumps(result, indent=2, ensure_ascii=False))
-
-    # Test RugWatch
-    rpc_url = "https://api.mainnet.solana.com"
-    mint_str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC mint
-    rugwatch_result = run_rugwatch_token_checks(rpc_url, mint_str)
-    print("\nRugWatch result:")
-    print(json.dumps(rugwatch_result, indent=2, ensure_ascii=False))
-
-    risk = rugwatch_risk_score(rugwatch_result, "unknown")
-    print("\nRisk score:")
-    print(json.dumps(risk, indent=2, ensure_ascii=False))
-
-    # Test Honeypot (async)
-    import asyncio
-    result = asyncio.run(honeypot_check_teycir("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", chain="ethereum", etherscan_api_key=key))
-    print("\nHoneypot result:")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
-
-
-# ==================== RUGWATCH INTEGRATION (Solana) ====================
-from solana.rpc.api import Client
-from solders.pubkey import Pubkey
-from spl.token._layouts import MINT_LAYOUT
-from spl.token.core import MintInfo
-
-# White list for known safe tokens (stablecoins, wrapped tokens)
-SAFE_TOKEN_WHITELIST = {
-    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
-    "So11111111111111111111111111111111111111112",    # SOL (wrapped SOL)
-}
-
-def run_rugwatch_token_checks(rpc_url: str = "https://api.mainnet-beta.solana.com", mint_str: str = "") -> Dict[str, Any]:
-    """
-    Проверка токена Solana: mint/freeze authorities, decimals, supply.
-    Риск: активные authorities = высокий риск, revoked = низкий риск.
-    Многие легитимные токены отзывают authorities после запуска для безопасности.
-    """
-    try:
-        client = Client(rpc_url)
-        mint_pubkey = Pubkey.from_string(mint_str)
-
-        account_info = client.get_account_info(mint_pubkey)
-        if account_info.value is None:
-            raise Exception("Mint account not found")
-        data = account_info.value.data
-        mint_data = MINT_LAYOUT.parse(data)
-        mint_info = MintInfo(
-            mint_authority=mint_data.mint_authority,
-            supply=mint_data.supply,
-            decimals=mint_data.decimals,
-            is_initialized=mint_data.is_initialized,
-            freeze_authority=mint_data.freeze_authority
-        )
-
-        has_mint_authority = mint_info.mint_authority is not None
-        has_freeze_authority = mint_info.freeze_authority is not None
-
-        # Базовая оценка рисков
-        risk_score = 0
-        reasons = []
-
-        if has_mint_authority:
-            risk_score += 25  # Снижено, так как многие legit токены имеют active authority временно
-            reasons.append("Mint authority active (moderate risk)")
-        else:
-            reasons.append("Mint authority revoked (safe)")
-
-        if has_freeze_authority:
-            risk_score += 15  # Freeze authority чаще остается для emergency
-            reasons.append("Freeze authority active (low risk)")
-        else:
-            reasons.append("Freeze authority revoked (safe)")
-
-        if mint_info.decimals > 12 or mint_info.decimals < 6:
-            risk_score += 10
-            reasons.append(f"Uncommon decimals: {mint_info.decimals}")
-
-        return {
-            "has_mint_authority": has_mint_authority,
-            "has_freeze_authority": has_freeze_authority,
-            "decimals": mint_info.decimals,
-            "supply": str(mint_info.supply),
-            "risk_score": risk_score,
-            "reasons": reasons
-        }
-
-    except Exception as e:
-        return {
-            "has_mint_authority": True,
-            "has_freeze_authority": True,
-            "decimals": 9,
-            "supply": "0",
-            "risk_score": 50,
-            "reasons": [f"Check failed: {str(e)[:80]}"]
-        }
-
-def rugwatch_risk_score(mint_data: Dict[str, Any], source: str = "unknown") -> Dict[str, Any]:
-    """
-    Идеальный риск-скоринг для Solana токенов (2026 best practices).
-    Основан на анализе тысяч rug pull'ов и honeypot'ов.
-    """
-    score = 0
-    reasons = []
-
-    has_mint = mint_data.get("has_mint_authority", True)
-    has_freeze = mint_data.get("has_freeze_authority", True)
-    decimals = mint_data.get("decimals", 9)
-
-    # === Критические сигналы ===
-    if has_mint:
-        score += 30
-        reasons.append("Mint authority active")
-    else:
-        reasons.append("Mint authority revoked (safe)")
-
-    if has_freeze:
-        score += 20
-        reasons.append("Freeze authority active")
-    else:
-        reasons.append("Freeze authority revoked (safe)")
-
-    # LP not locked
-    lp_locked = "raydium" in source.lower()  # Assume Raydium locks LP
-    if not lp_locked:
-        score += 20
-        reasons.append("LP not locked")
-
-    # Low initial liquidity
-    low_liquidity = source.lower() == "pumpfun"  # Assume Pump.fun has low liquidity initially
-    if low_liquidity:
-        score += 15
-        reasons.append("Low initial liquidity (<5 SOL)")
-
-    # Decimals weird
-    if decimals > 12 or decimals < 6:
-        score += 5
-        reasons.append(f"Weird decimals ({decimals})")
-
-    # === Бонус за низкий риск ===
-    if not has_mint and not has_freeze:
-        score = max(0, score - 20)  # значительный бонус за чистый токен
-
-    # Cap
-    total_score = min(100, max(0, score))
-
-    # Verdict
-    if total_score < 30:
-        verdict = "PASS"
-    elif total_score < 70:
-        verdict = "WARN"
-    else:
-        verdict = "BLOCK"
-
-    return {
-        "source": "rugwatch",
-        "risk_score": total_score,
-        "reasons": reasons,
-        "status": "HIGH_RISK" if verdict == "BLOCK" else "MEDIUM_RISK" if verdict == "WARN" else "LOW_RISK",
-        "verdict": verdict,
-        "breakdown": {
-            "mint_authority_active": 30 if has_mint else 0,
-            "freeze_authority_active": 20 if has_freeze else 0,
-            "lp_not_locked": 20 if not lp_locked else 0,
-            "low_initial_liquidity_sol": 15 if low_liquidity else 0,
-            "decimals_weird": 5 if (decimals > 12 or decimals < 6) else 0
-        }
-    }
-
-
-async def check_lp_info(mint: str) -> dict:
-    """
-    Получить данные о liquidity через DexScreener API.
-    Возвращает: {liquidity_usd: float, lp_locked: bool | None}
-    lp_locked=None если данных нет (failopen).
-    """
-    url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
-    async with httpx.AsyncClient() as client:
-        try:
-            resp = await client.get(url, timeout=10)
-            if resp.status_code != 200:
-                return {"liquidity_usd": 0.0, "lp_locked": None}
-            data = resp.json()
-            pairs = data.get("pairs") or []
-            if not pairs:
-                return {"liquidity_usd": 0.0, "lp_locked": None}
-            pair = pairs[0]
-            liquidity_usd = pair.get("liquidity", {}).get("usd", 0.0)
-            # DexScreener не возвращает lp_locked напрямую — возвращаем None
-            return {"liquidity_usd": liquidity_usd, "lp_locked": None}
-        except Exception:
-            return {"liquidity_usd": 0.0, "lp_locked": None}
-
-
-async def check_token(token_address: str, rpc_url: str = "https://api.mainnet-beta.solana.com", source: str = "unknown") -> Dict[str, Any]:
-    """
-    Check if a Solana token is safe (low risk).
-    Returns dict with 'safe' boolean and other details.
-    """
-    # Check known safe tokens first
-    if is_known_safe(token_address):
-        return {
-            "token_address": token_address,
-            "safe": True,
-            "risk_score": 0,
-            "status": "KNOWN_SAFE",
-            "reasons": ["Known legitimate project"],
-            "verdict": "PASS",
-            "lp_liquidity_usd": 0.0,
-            "lp_locked": None,
-            "honeypot_data": {"is_honeypot": False, "confidence": 0.0, "reason": "known safe"},
-            "raw_data": {}
-        }
-
-    # Check whitelist first
-    if token_address in SAFE_TOKEN_WHITELIST:
-        return {
-            "token_address": token_address,
-            "safe": True,
-            "risk_score": 0,
-            "status": "WHITELISTED",
-            "reasons": ["Known safe token (whitelisted)"],
-            "verdict": "PASS",
-            "lp_liquidity_usd": 0.0,
-            "lp_locked": None,
-            "honeypot_data": {"is_honeypot": False, "confidence": 0.0, "reason": "whitelisted"},
-            "raw_data": {}
-        }
-
-    try:
-        raw_data = run_rugwatch_token_checks(rpc_url, token_address)
-        risk_score = rugwatch_risk_score(raw_data, source)
-        score = risk_score.get("risk_score", 100)
-        verdict = risk_score.get("verdict", "BLOCK")
-
-        # Get LP info
-        lp_info = await check_lp_info(token_address)
-        lp_liquidity_usd = lp_info["liquidity_usd"]
-        lp_locked = lp_info["lp_locked"]
-
-        # Adjust score based on LP
-        if lp_liquidity_usd < 500:
-            score += 15
-            risk_score["reasons"].append("Low initial liquidity")
-
-        if lp_locked is False:
-            score += 20
-            risk_score["reasons"].append("LP not locked")
-
-        # Recalculate verdict after adjustments
-        if score < 30:
-            verdict = "PASS"
-        elif score < 70:
+# collectors/security_checker.py
+import asyncio
+from datetime import datetime, timezone
+from typing import Dict, Any, List
+
+from utils.cache import cache_get, cache_set
+from utils.rate_limit import acquire
+from utils.retry import with_retry
+from utils.clock import utc_now_iso
+
+# Импортируем существующие модули из твоего репо
+from collectors.honeypot_simulator import check_honeypot  # или как у тебя называется
+from collectors.rug_engine import assess_rug_risk
+from collectors.authority_checks import check_solana_authorities
+from collectors.dev_risk_checks import check_dev_risk
+
+
+class SecurityChecker:
+    def __init__(self):
+        self.cache_ttl_sec = 1800  # 30 минут
+
+    async def check_token(self, token_address: str, chain: str = "solana") -> Dict[str, Any]:
+        cache_key = f"security_{chain}_{token_address}"
+        cached = cache_get("dex", cache_key)
+        if cached:
+            return cached
+
+        acquire("dex")
+
+        # 1. Honeypot check (Teycir-style)
+        honeypot_result = await check_honeypot(token_address, chain)
+
+        # 2. Rug assessment (RugWatch-style)
+        rug_result = assess_rug_risk(token_address, chain)
+
+        # 3. Solana-specific authority checks
+        authority_result = {}
+        if chain == "solana":
+            authority_result = await check_solana_authorities(token_address)
+
+        # 4. Dev risk
+        dev_result = check_dev_risk(token_address)
+
+        # === Объединяем в единый вердикт ===
+        honeypot = honeypot_result.get("is_honeypot", False)
+        rug_score = float(rug_result.get("rug_score", 0.0))
+        authority_risk = authority_result.get("risk_score", 0.0)
+
+        final_rug_score = round((rug_score + authority_risk + (10.0 if honeypot else 0.0)) / 3, 2)
+
+        if final_rug_score >= 7.5 or honeypot:
+            risk_level = "HIGH"
+            verdict = "BLOCK"
+        elif final_rug_score >= 4.0:
+            risk_level = "MEDIUM"
             verdict = "WARN"
         else:
-            verdict = "BLOCK"
+            risk_level = "LOW"
+            verdict = "PASS"
 
-        safe = verdict != "BLOCK"
-
-        # Honeypot check
-        honeypot_data = await simulate_solana_honeypot(token_address)
-        if honeypot_data["is_honeypot"] and honeypot_data["confidence"] > 0.7:
-            score += 40
-            risk_score["reasons"].append("Honeypot: no sells detected")
-
-            # Recalculate verdict
-            if score < 30:
-                verdict = "PASS"
-            elif score < 70:
-                verdict = "WARN"
-            else:
-                verdict = "BLOCK"
-
-        return {
+        result = {
             "token_address": token_address,
-            "safe": safe,
-            "risk_score": score,
-            "status": risk_score.get("status", "UNKNOWN"),
-            "reasons": risk_score.get("reasons", []),
+            "honeypot": honeypot,
+            "rug_score": final_rug_score,
+            "risk_level": risk_level,
             "verdict": verdict,
-            "lp_liquidity_usd": lp_liquidity_usd,
-            "lp_locked": lp_locked,
-            "honeypot_data": honeypot_data,
-            "raw_data": raw_data
+            "reasons": self._build_reasons(honeypot_result, rug_result, authority_result, dev_result),
+            "solana_specific": authority_result,
+            "checked_at": utc_now_iso(),
         }
-    except Exception as e:
-        return {
-            "token_address": token_address,
-            "safe": False,
-            "error": str(e),
-            "status": "ERROR",
-            "verdict": "BLOCK",
-            "lp_liquidity_usd": 0.0,
-            "lp_locked": None,
-            "honeypot_data": {"is_honeypot": False, "confidence": 0.0, "reason": "error"}
-        }
+
+        cache_set("dex", cache_key, result, ttl_sec=self.cache_ttl_sec)
+        return result
+
+    def _build_reasons(self, honeypot_res, rug_res, authority_res, dev_res) -> List[str]:
+        reasons = []
+        if honeypot_res.get("is_honeypot"):
+            reasons.append("honeypot_patterns_detected")
+        if rug_res.get("lp_locked") is False:
+            reasons.append("liquidity_not_locked")
+        if authority_res.get("freeze_authority_active"):
+            reasons.append("freeze_authority_active")
+        if authority_res.get("mint_authority_active"):
+            reasons.append("mint_authority_active")
+        if dev_res.get("dev_sell_pressure_high"):
+            reasons.append("high_dev_sell_pressure")
+        return reasons[:6]  # не больше 6 причин
+
+    async def check_batch(self, token_addresses: List[str], chain: str = "solana") -> List[Dict[str, Any]]:
+        tasks = [self.check_token(addr, chain) for addr in token_addresses]
+        return await asyncio.gather(*tasks)
+
+    def build_security_text_section(self, results: List[Dict[str, Any]]) -> str:
+        lines = ["=== SECURITY CHECK (Honeypot + Rug + Authority) ==="]
+        for r in results:
+            status = "✅ PASS" if r["verdict"] == "PASS" else "⚠️ WARN" if r["verdict"] == "WARN" else "❌ BLOCK"
+            lines.append(
+                f"{status} {r['token_address'][:8]}... | "
+                f"Rug: {r['rug_score']:.1f} | "
+                f"Honeypot: {'YES' if r['honeypot'] else 'no'} | "
+                f"Risk: {r['risk_level']}"
+            )
+        return "\n".join(lines) + "\n"
