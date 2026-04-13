@@ -13,7 +13,11 @@ from utils.clock import utc_now_iso
 from utils.io import write_json
 
 # Import existing collectors
-from .github_signal import collect_enhanced_github_candidates, build_github_text_section, generate_coding_agent_prompt
+from .github_signal import (
+    collect_enhanced_github_candidates,
+    build_github_text_section,
+    generate_coding_agent_prompt,
+)
 from .new_pools import get_new_pools
 from .cross_chain_collector import get_cross_chain_pools
 from .security_checker import SecurityChecker
@@ -54,7 +58,9 @@ class FreeDiscoveryAggregator:
         github_data = results[0] if not isinstance(results[0], Exception) else []
         new_pools_data = results[1] if not isinstance(results[1], Exception) else []
         cross_chain_data = results[2] if not isinstance(results[2], Exception) else []
-        onchain_liquidity_data = results[3] if not isinstance(results[3], Exception) else []
+        onchain_liquidity_data = (
+            results[3] if not isinstance(results[3], Exception) else []
+        )
 
         # Basic security checks for top candidates
         security_data = await self._collect_security_checks(
@@ -62,10 +68,14 @@ class FreeDiscoveryAggregator:
         )
 
         # Security and arb checks for onchain liquidity candidates
-        security_arb_results = await self._collect_security_arb_checks(onchain_liquidity_data)
+        security_arb_results = await self._collect_security_arb_checks(
+            onchain_liquidity_data
+        )
 
         # Generate coding agent prompt for GitHub repos
-        coding_agent_prompt = generate_coding_agent_prompt(github_data) if github_data else ""
+        coding_agent_prompt = (
+            generate_coding_agent_prompt(github_data) if github_data else ""
+        )
 
         collected_data = {
             "timestamp": utc_now_iso(),
@@ -134,7 +144,9 @@ class FreeDiscoveryAggregator:
         """Collect onchain liquidity candidates"""
         try:
             collector = OnchainLiquidityCollector()
-            return await collector.get_onchain_liquidity_candidates(max_candidates=self.max_candidates)
+            return await collector.get_onchain_liquidity_candidates(
+                max_candidates=self.max_candidates
+            )
         except Exception as e:
             logger.error(f"Onchain liquidity collection failed: {e}")
             return []
@@ -144,13 +156,17 @@ class FreeDiscoveryAggregator:
     ) -> List[Dict[str, Any]]:
         """Basic security checks for top pools"""
         security_checker = SecurityChecker()
-        token_addresses = [pool.get("token_address", "") for pool in pools if pool.get("token_address")]
+        token_addresses = [
+            pool.get("token_address", "") for pool in pools if pool.get("token_address")
+        ]
 
         if not token_addresses:
             return []
 
         try:
-            security_results = await security_checker.check_batch(token_addresses, chain="solana")
+            security_results = await security_checker.check_batch(
+                token_addresses, chain="solana"
+            )
             return security_results
         except Exception as e:
             logger.warning(f"Batch security check failed: {e}")
@@ -158,7 +174,14 @@ class FreeDiscoveryAggregator:
             return [
                 {
                     "token_address": addr,
-                    "symbol": next((pool.get("symbol", "UNKNOWN") for pool in pools if pool.get("token_address") == addr), "UNKNOWN"),
+                    "symbol": next(
+                        (
+                            pool.get("symbol", "UNKNOWN")
+                            for pool in pools
+                            if pool.get("token_address") == addr
+                        ),
+                        "UNKNOWN",
+                    ),
                     "honeypot": False,
                     "rug_score": 10.0,
                     "risk_level": "HIGH",
@@ -175,13 +198,17 @@ class FreeDiscoveryAggregator:
     ) -> List[Dict[str, Any]]:
         """Security and light arb checks for onchain pools"""
         checker = SecurityAndArbChecker()
-        token_addresses = [pool.get("token_address", "") for pool in pools if pool.get("token_address")]
+        token_addresses = [
+            pool.get("token_address", "") for pool in pools if pool.get("token_address")
+        ]
 
         if not token_addresses:
             return []
 
         try:
-            security_arb_results = await checker.check_batch(token_addresses, chain="solana")
+            security_arb_results = await checker.check_batch(
+                token_addresses, chain="solana"
+            )
             return security_arb_results
         except Exception as e:
             logger.warning(f"Batch security and arb check failed: {e}")
@@ -189,7 +216,14 @@ class FreeDiscoveryAggregator:
             return [
                 {
                     "token_address": addr,
-                    "symbol": next((pool.get("symbol", "UNKNOWN") for pool in pools if pool.get("token_address") == addr), "UNKNOWN"),
+                    "symbol": next(
+                        (
+                            pool.get("symbol", "UNKNOWN")
+                            for pool in pools
+                            if pool.get("token_address") == addr
+                        ),
+                        "UNKNOWN",
+                    ),
                     "honeypot": False,
                     "rug_score": 10.0,
                     "risk_level": "HIGH",
@@ -400,7 +434,9 @@ class FreeDiscoveryAggregator:
         timestamp_str = dt.strftime("%Y%m%d_%H%M")
         payload_filename = f"coding_agent_payload_{timestamp_str}.json"
         payload_path = history_dir / payload_filename
-        write_json(payload_path, {"github_enriched": github_enriched, "timestamp": timestamp})
+        write_json(
+            payload_path, {"github_enriched": github_enriched, "timestamp": timestamp}
+        )
 
         logger.info(f"Saved coding agent payload to {payload_path}")
 
