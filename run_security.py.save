@@ -2,8 +2,8 @@ from
 collectors.new_pools 
 import 
 get_new_tokens, 
-f#!/usr/bin/env 
-python3
+filter_tokens
+#!/usr/bin/env python3
 """
 Level 1-2 Token Security Runner — финальная версия
 """

@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Constants
-DEXSCREENER_API_URL = "https://api.dexscreener.com/latest/dex/search?q=solana"
+PUMP_FUN_API_URL = "https://frontend-api.pump.fun/coins?offset=0&limit=50&sort=created_timestamp&order=DESC"
 MIN_FDV = 10000  # $10k minimum fully diluted valuation
 
 # Setup logging
@@ -22,89 +22,69 @@ seen_tokens = set()
 
 
 async def fetch_new_tokens(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
-    """Fetch new tokens from DexScreener API"""
+    """Fetch new tokens from Pump.fun API"""
     try:
-        async with session.get(DEXSCREENER_API_URL, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+        async with session.get(PUMP_FUN_API_URL, timeout=aiohttp.ClientTimeout(total=30)) as resp:
             if resp.status != 200:
-                logger.error(f"DexScreener API returned status {resp.status}")
+                logger.error(f"Pump.fun API returned status {resp.status}")
                 return []
 
             data = await resp.json()
 
-            logger.info(f"DexScreener API returned: {type(data)}")
+            logger.info(f"Pump.fun API returned: {type(data)}")
 
-            # Handle different response structures
-            pairs = []
-            if isinstance(data, dict):
-                pairs = data.get("pairs", [])
-            elif isinstance(data, list):
-                pairs = data
-            else:
-                logger.error("Unexpected API response format")
-                return []
+            # Assume data is list of coins
+            coins = data if isinstance(data, list) else []
 
-            logger.info(f"Processing {len(pairs)} pairs")
+            logger.info(f"Processing {len(coins)} coins")
 
             new_tokens = []
-            for pair in pairs:
-                # Extract token info from pair data
-                base_token = pair.get("baseToken", {})
-                token_address = base_token.get("address")
-                symbol = base_token.get("symbol", "")
+            for coin in coins:
+                # Extract token info from coin data
+                token_address = coin.get("mint")
+                symbol = coin.get("symbol", "")
 
-                # Skip if not a valid token or if it's SOL
-                if not token_address or symbol == "SOL":
+                # Skip if not a valid token
+                if not token_address:
                     continue
 
-                # Get pair creation time and other metrics
-                pair_created_at = pair.get("pairCreatedAt")
-                fdv = pair.get("fdv", 0)
-                market_cap = pair.get("marketCap", 0)
+                # Get creation time
+                created_timestamp = coin.get("created_timestamp")
+                if created_timestamp:
+                    try:
+                        created_time = datetime.fromtimestamp(created_timestamp / 1000)
+                        age_hours = (datetime.now() - created_time).total_seconds() / 3600
+                        if age_hours > 24:
+                            continue
+                    except:
+                        continue
+                else:
+                    continue
+
+                # Get market cap
+                market_cap = coin.get("market_cap", 0)
+                if market_cap < MIN_FDV:
+                    continue
 
                 # Skip if already seen
                 if token_address in seen_tokens:
                     continue
 
-                # Apply filters - use market cap if available, otherwise fdv
-                cap_to_check = market_cap if market_cap > 0 else fdv
-                if cap_to_check < MIN_FDV:
-                    continue
-
-                # Check if pair created within last 24 hours
-                try:
-                    if isinstance(pair_created_at, str):
-                        created_time = datetime.fromisoformat(pair_created_at.replace('Z', '+00:00'))
-                    elif isinstance(pair_created_at, int):
-                        # Unix timestamp in milliseconds
-                        created_time = datetime.fromtimestamp(pair_created_at / 1000)
-                    else:
-                        raise ValueError(f"Unsupported timestamp format: {type(pair_created_at)}")
-
-                    age_hours = (datetime.now() - created_time).total_seconds() / 3600
-                    if age_hours > 24:
-                        continue
-                except Exception:
-                    continue
-
                 # Mark as seen
                 seen_tokens.add(token_address)
-
-                # Get liquidity in SOL
-                liquidity_usd = pair.get("liquidity", {}).get("usd", 0)
-                liquidity_sol = liquidity_usd / 200 if liquidity_usd > 0 else 0  # Rough approximation
 
                 token_data = {
                     "token_address": token_address,
                     "creator": "unknown",
-                    "liquidity_sol": round(liquidity_sol, 2),
+                    "liquidity_sol": 0.0,  # Not available
                     "timestamp": datetime.now().isoformat(),
-                    "source": "dexscreener",
-                    "fdv": fdv,
+                    "source": "pumpfun",
+                    "fdv": market_cap,
                     "market_cap": market_cap
                 }
 
                 new_tokens.append(token_data)
-                logger.info(f"Found new DexScreener token: {token_address} (Cap: ${cap_to_check:,.0f})")
+                logger.info(f"Found new Pump.fun token: {token_address} (Cap: ${market_cap:,.0f})")
 
             return new_tokens
 
@@ -151,7 +131,7 @@ async def run_collector():
             with open("data/new_pools_raw.json", 'r') as f:
                 existing_pools = json.load(f)
                 global seen_tokens
-                seen_tokens = {pool["token_address"] for pool in existing_pools if pool.get("source") == "dexscreener"}
+                seen_tokens = {pool["token_address"] for pool in existing_pools if pool.get("source") in ["dexscreener", "pumpfun"]}
                 logger.info(f"Loaded {len(seen_tokens)} existing DexScreener tokens")
     except Exception as e:
         logger.warning(f"Could not load existing tokens: {e}")
@@ -188,10 +168,9 @@ def get_recent_pools(limit: int = 50) -> List[str]:
             pools = json.load(f)
 
         # Filter by source and time
-        cutoff = datetime.now() - timedelta(hours=24)
         recent_pools = []
         for pool in pools:
-            if pool.get("source") != "dexscreener":
+            if pool.get("source") not in ["dexscreener", "pumpfun"]:
                 continue
 
             try:
@@ -208,5 +187,27 @@ def get_recent_pools(limit: int = 50) -> List[str]:
         return []
 
 
+async def run_once():
+    """Run one-time collection from DexScreener API for testing"""
+    logger.info("Running one-time collection from DexScreener API...")
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            new_tokens = await fetch_new_tokens(session)
+
+            if new_tokens:
+                await save_tokens_to_file(new_tokens)
+                logger.info(f"Saved {len(new_tokens)} tokens from DexScreener API")
+            else:
+                logger.info("No new tokens found")
+
+        except Exception as e:
+            logger.error(f"Error in one-time collection: {e}")
+
+
 if __name__ == "__main__":
-    asyncio.run(run_collector())
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--once":
+        asyncio.run(run_once())
+    else:
+        asyncio.run(run_collector())

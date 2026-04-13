@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import sys
+import csv
 from typing import List, Dict, Any
 from datetime import datetime
 import asyncio
@@ -65,34 +66,43 @@ async def run_pipeline(dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Could not load pool data: {e}")
 
-    # Run security checks
+    # Run security checks in parallel
     logger.info("Running security checks...")
     safe_tokens = []
 
-    for i, token in enumerate(all_tokens, 1):
-        logger.info(f"Checking token {i}/{len(all_tokens)}: {token}")
-
+    async def check_single_token(token):
+        source = pool_data.get(token, {}).get('source', 'unknown')
+        logger.info(f"Checking token: {token} (source: {source})")
         try:
-            result = check_token(token)
-            if result.get('safe'):
-                # Enrich with pool data
-                pool_info = pool_data.get(token, {})
-                result.update({
-                    'liquidity_sol': pool_info.get('liquidity_sol', 0.0),
-                    'source': pool_info.get('source', 'unknown'),
-                    'timestamp': pool_info.get('timestamp', datetime.now().isoformat())
-                })
-                safe_tokens.append(result)
-                logger.info(f"✓ Token {token} passed security check")
-            else:
-                logger.info(f"✗ Token {token} failed security check: {result.get('status', 'UNKNOWN')}")
-
-            # Rate limiting to avoid API bans
-            await asyncio.sleep(0.5)
-
+            result = await asyncio.to_thread(check_token, token, source=source)
+            return token, result
         except Exception as e:
             logger.error(f"Error checking token {token}: {e}")
+            return token, None
+
+    # Run all checks in parallel
+    tasks = [check_single_token(token) for token in all_tokens]
+    results = await asyncio.gather(*tasks)
+
+    for token, check_result in results:
+        if check_result is None:
             continue
+        if check_result.get('safe'):
+            # Enrich with pool data
+            pool_info = pool_data.get(token, {})
+            check_result.update({
+                'liquidity_sol': pool_info.get('liquidity_sol', 0.0),
+                'source': pool_info.get('source', 'unknown'),
+                'timestamp': pool_info.get('timestamp', datetime.now().isoformat())
+            })
+            safe_tokens.append(check_result)
+            score = check_result.get('risk_score', 'N/A')
+            logger.info(f"✓ Token {token} passed security check (Score: {score})")
+        else:
+            reasons = check_result.get('reasons', [])
+            reason_str = " | ".join(reasons) if reasons else "Unknown"
+            score = check_result.get('risk_score', 'N/A')
+            logger.info(f"✗ Token {token} failed security check: {check_result.get('status', 'UNKNOWN')} (Score: {score}) (Reasons: {reason_str})")
 
     logger.info(f"Security checks complete: {len(safe_tokens)}/{len(all_tokens)} tokens passed")
 
@@ -112,11 +122,23 @@ async def run_pipeline(dry_run: bool = False) -> None:
         line = f"{token_address} | {score} | {liquidity} | {source} | {timestamp}"
         output_lines.append(line)
 
+    # Prepare data for CSV
+    csv_data = []
+    for result in safe_tokens:
+        csv_data.append({
+            'token_address': result.get('token_address', ''),
+            'score': result.get('risk_score', 0),
+            'liquidity_sol': result.get('liquidity_sol', 0.0),
+            'source': result.get('source', 'unknown'),
+            'timestamp': result.get('timestamp', datetime.now().isoformat())
+        })
+
     # Write to file or dry run
     if dry_run:
         logger.info("DRY RUN - Would write the following to data/daily_aggregate.txt:")
         for line in output_lines:
             print(line)
+        logger.info("DRY RUN - Would export to data/signals.csv")
     else:
         output_file = "data/daily_aggregate.txt"
         try:
@@ -126,6 +148,18 @@ async def run_pipeline(dry_run: bool = False) -> None:
             logger.info(f"Results written to {output_file}")
         except Exception as e:
             logger.error(f"Error writing to {output_file}: {e}")
+
+        # Export to CSV
+        csv_file = "data/signals.csv"
+        try:
+            with open(csv_file, 'w', newline='') as f:
+                fieldnames = ['token_address', 'score', 'liquidity_sol', 'source', 'timestamp']
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(csv_data)
+            logger.info(f"Data exported to {csv_file}")
+        except Exception as e:
+            logger.error(f"Error exporting to {csv_file}: {e}")
 
     # Summary
     logger.info(f"Pipeline complete: Processed {len(all_tokens)} tokens, {len(safe_tokens)} safe, {len(output_lines)} aggregated")

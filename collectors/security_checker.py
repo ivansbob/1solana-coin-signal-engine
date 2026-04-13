@@ -178,12 +178,23 @@ if __name__ == "__main__":
     print("\nRugWatch result:")
     print(json.dumps(rugwatch_result, indent=2, ensure_ascii=False))
 
+    risk = rugwatch_risk_score(rugwatch_result, "unknown")
+    print("\nRisk score:")
+    print(json.dumps(risk, indent=2, ensure_ascii=False))
+
 
 # ==================== RUGWATCH INTEGRATION (Solana) ====================
 from solana.rpc.api import Client
 from solders.pubkey import Pubkey
 from spl.token._layouts import MINT_LAYOUT
 from spl.token.core import MintInfo
+
+# White list for known safe tokens (stablecoins, wrapped tokens)
+SAFE_TOKEN_WHITELIST = {
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    "So11111111111111111111111111111111111111112",    # SOL (wrapped SOL)
+}
 
 def run_rugwatch_token_checks(rpc_url: str = "https://api.mainnet-beta.solana.com", mint_str: str = "") -> Dict[str, Any]:
     """
@@ -250,7 +261,7 @@ def run_rugwatch_token_checks(rpc_url: str = "https://api.mainnet-beta.solana.co
             "reasons": [f"Check failed: {str(e)[:80]}"]
         }
 
-def rugwatch_risk_score(mint_data: Dict[str, Any]) -> Dict[str, Any]:
+def rugwatch_risk_score(mint_data: Dict[str, Any], source: str = "unknown") -> Dict[str, Any]:
     """
     Идеальный риск-скоринг для Solana токенов (2026 best practices).
     Основан на анализе тысяч rug pull'ов и honeypot'ов.
@@ -262,16 +273,20 @@ def rugwatch_risk_score(mint_data: Dict[str, Any]) -> Dict[str, Any]:
     has_freeze = mint_data.get("has_freeze_authority", True)
     decimals = mint_data.get("decimals", 9)
 
-    # === Критические сигналы ===
+    # === Критические сигналы (adjusted for new tokens) ===
     if has_mint:
-        score += 38
-        reasons.append("Mint активен — допечать можно")
+        score += 15  # Reduced for new tokens - mint authority is common initially
+        reasons.append("Mint активен — допечать можно (нормально для новых токенов)")
     else:
         reasons.append("Mint revoked — безопасно")
 
-    if has_freeze:
-        score += 25
-        reasons.append("Freeze активен — заморозка возможна")
+    # For new tokens, freeze authority is acceptable
+    if has_freeze and has_mint:
+        score += 10  # Reduced penalty
+        reasons.append("Freeze + Mint активны — умеренный риск")
+    elif has_freeze and not has_mint:
+        score += 5  # Minor penalty for freeze without mint
+        reasons.append("Freeze активен (Mint revoked) — умеренный риск")
     else:
         reasons.append("Freeze revoked — безопасно")
 
@@ -284,11 +299,16 @@ def rugwatch_risk_score(mint_data: Dict[str, Any]) -> Dict[str, Any]:
     if not has_mint and not has_freeze:
         score = max(0, score - 20)  # значительный бонус за чистый токен
 
-    # Cap
-    total_score = min(100, score)
+    # Bonus for Raydium tokens (LP potentially burned)
+    if "raydium" in source.lower():
+        score -= 15
+        reasons.append("Raydium token - LP burn bonus applied (-15)")
 
-    # Статус
-    if total_score >= 60:
+    # Cap
+    total_score = min(100, max(0, score))
+
+    # Статус - adjusted for new tokens
+    if total_score >= 70:
         status = "HIGH_RISK"
     elif total_score >= 30:
         status = "MEDIUM_RISK"
@@ -308,16 +328,29 @@ def rugwatch_risk_score(mint_data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def check_token(token_address: str, rpc_url: str = "https://api.mainnet-beta.solana.com") -> Dict[str, Any]:
+def check_token(token_address: str, rpc_url: str = "https://api.mainnet-beta.solana.com", source: str = "unknown") -> Dict[str, Any]:
     """
     Check if a Solana token is safe (low risk).
     Returns dict with 'safe' boolean and other details.
     """
+    # Check whitelist first
+    if token_address in SAFE_TOKEN_WHITELIST:
+        return {
+            "token_address": token_address,
+            "safe": True,
+            "risk_score": 0,
+            "status": "WHITELISTED",
+            "reasons": ["Known safe token (whitelisted)"],
+            "raw_data": {}
+        }
+
     try:
         raw_data = run_rugwatch_token_checks(rpc_url, token_address)
-        risk_score = rugwatch_risk_score(raw_data)
+        risk_score = rugwatch_risk_score(raw_data, source)
         score = risk_score.get("risk_score", 100)
-        safe = score < 30  # LOW_RISK threshold
+
+        # For new tokens, be more lenient - allow MEDIUM_RISK (score < 70)
+        safe = score < 70  # Allow MEDIUM_RISK for new tokens
 
         return {
             "token_address": token_address,
