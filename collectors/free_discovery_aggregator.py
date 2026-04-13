@@ -17,6 +17,7 @@ from .github_signal import get_github_candidates, build_github_text_section
 from .new_pools import get_new_pools
 from .cross_chain_collector import get_cross_chain_pools
 from .security_checker import SecurityChecker
+from .security_and_arb_checker import SecurityAndArbChecker
 from .onchain_liquidity_collector import OnchainLiquidityCollector
 from .light_arb_detector import LightArbDetector
 
@@ -60,6 +61,9 @@ class FreeDiscoveryAggregator:
             new_pools_data[: self.max_candidates]
         )
 
+        # Security and arb checks for onchain liquidity candidates
+        security_arb_results = await self._collect_security_arb_checks(onchain_liquidity_data)
+
         collected_data = {
             "timestamp": utc_now_iso(),
             "github_repos": github_data,
@@ -67,10 +71,11 @@ class FreeDiscoveryAggregator:
             "cross_chain_pools": cross_chain_data[: self.max_candidates],
             "onchain_liquidity_candidates": onchain_liquidity_data,
             "security_results": security_data,
+            "security_arb_results": security_arb_results,
         }
 
         logger.info(
-            f"Collection complete: {len(new_pools_data)} new pools, {len(cross_chain_data)} cross-chain, {len(onchain_liquidity_data)} onchain liquidity, {len(security_data)} security checks"
+            f"Collection complete: {len(new_pools_data)} new pools, {len(cross_chain_data)} cross-chain, {len(onchain_liquidity_data)} onchain liquidity, {len(security_data)} security checks, {len(security_arb_results)} security+arb checks"
         )
         return collected_data
 
@@ -158,6 +163,40 @@ class FreeDiscoveryAggregator:
                 for addr in token_addresses
             ]
 
+    async def _collect_security_arb_checks(
+        self, pools: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Security and light arb checks for onchain pools"""
+        checker = SecurityAndArbChecker()
+        token_addresses = [pool.get("token_address", "") for pool in pools if pool.get("token_address")]
+
+        if not token_addresses:
+            return []
+
+        try:
+            security_arb_results = await checker.check_batch(token_addresses, chain="solana")
+            return security_arb_results
+        except Exception as e:
+            logger.warning(f"Batch security and arb check failed: {e}")
+            # Return error results for all tokens
+            return [
+                {
+                    "token_address": addr,
+                    "symbol": next((pool.get("symbol", "UNKNOWN") for pool in pools if pool.get("token_address") == addr), "UNKNOWN"),
+                    "honeypot": False,
+                    "rug_score": 10.0,
+                    "risk_level": "HIGH",
+                    "verdict": "BLOCK",
+                    "reasons": [f"Security check error: {str(e)[:50]}"],
+                    "solana_specific": {},
+                    "cross_dex_spread_pct": 0.0,
+                    "arb_spread_score": 0,
+                    "arb_opportunity": False,
+                    "checked_at": utc_now_iso(),
+                }
+                for addr in token_addresses
+            ]
+
     async def build_aggregate_text(self, collected_data: Dict[str, Any]) -> str:
         """Build the beautiful daily aggregate text"""
         timestamp = collected_data.get("timestamp", utc_now_iso())
@@ -223,6 +262,18 @@ class FreeDiscoveryAggregator:
             lines.append(arb_text)
         else:
             lines.append("No arbitrage data available")
+        lines.append("")
+
+        # Security + Light Arb Check
+        lines.append("🛡️ SECURITY + LIGHT ARB CHECK")
+        lines.append("-" * 50)
+        security_arb_results = collected_data.get("security_arb_results", [])
+        if security_arb_results:
+            checker = SecurityAndArbChecker()
+            combined_text = checker.build_combined_text_section(security_arb_results)
+            lines.append(combined_text)
+        else:
+            lines.append("No security and arb data available")
         lines.append("")
 
         # Cross-chain Opportunities
