@@ -17,6 +17,8 @@ from .github_signal import get_github_candidates, build_github_text_section
 from .new_pools import get_new_pools
 from .cross_chain_collector import get_cross_chain_pools
 from .security_checker import SecurityChecker
+from .onchain_liquidity_collector import OnchainLiquidityCollector
+from .light_arb_detector import LightArbDetector
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,7 @@ class FreeDiscoveryAggregator:
             self._collect_github_activity(),
             self._collect_new_pools(),
             self._collect_cross_chain_pools(),
+            self._collect_onchain_liquidity(),
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -50,6 +53,7 @@ class FreeDiscoveryAggregator:
         github_data = results[0] if not isinstance(results[0], Exception) else []
         new_pools_data = results[1] if not isinstance(results[1], Exception) else []
         cross_chain_data = results[2] if not isinstance(results[2], Exception) else []
+        onchain_liquidity_data = results[3] if not isinstance(results[3], Exception) else []
 
         # Basic security checks for top candidates
         security_data = await self._collect_security_checks(
@@ -61,11 +65,12 @@ class FreeDiscoveryAggregator:
             "github_repos": github_data,
             "new_pools": new_pools_data[: self.max_candidates],
             "cross_chain_pools": cross_chain_data[: self.max_candidates],
+            "onchain_liquidity_candidates": onchain_liquidity_data,
             "security_results": security_data,
         }
 
         logger.info(
-            f"Collection complete: {len(new_pools_data)} new pools, {len(cross_chain_data)} cross-chain, {len(security_data)} security checks"
+            f"Collection complete: {len(new_pools_data)} new pools, {len(cross_chain_data)} cross-chain, {len(onchain_liquidity_data)} onchain liquidity, {len(security_data)} security checks"
         )
         return collected_data
 
@@ -113,6 +118,15 @@ class FreeDiscoveryAggregator:
             logger.error(f"Cross-chain collection failed: {e}")
             return []
 
+    async def _collect_onchain_liquidity(self) -> List[Dict[str, Any]]:
+        """Collect onchain liquidity candidates"""
+        try:
+            collector = OnchainLiquidityCollector()
+            return await collector.get_onchain_liquidity_candidates(max_candidates=self.max_candidates)
+        except Exception as e:
+            logger.error(f"Onchain liquidity collection failed: {e}")
+            return []
+
     async def _collect_security_checks(
         self, pools: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -144,7 +158,7 @@ class FreeDiscoveryAggregator:
                 for addr in token_addresses
             ]
 
-    def build_aggregate_text(self, collected_data: Dict[str, Any]) -> str:
+    async def build_aggregate_text(self, collected_data: Dict[str, Any]) -> str:
         """Build the beautiful daily aggregate text"""
         timestamp = collected_data.get("timestamp", utc_now_iso())
         dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
@@ -185,6 +199,30 @@ class FreeDiscoveryAggregator:
                 )
         else:
             lines.append("No new liquidity flows detected")
+        lines.append("")
+
+        # Onchain Liquidity Candidates
+        lines.append("💰 ON-CHAIN LIQUIDITY CANDIDATES")
+        lines.append("-" * 50)
+        onchain_candidates = collected_data.get("onchain_liquidity_candidates", [])
+        if onchain_candidates:
+            collector = OnchainLiquidityCollector()
+            liquidity_text = collector.build_liquidity_text_section(onchain_candidates)
+            lines.append(liquidity_text)
+        else:
+            lines.append("No onchain liquidity candidates detected")
+        lines.append("")
+
+        # Light Arbitrage Opportunities
+        lines.append("🔄 LIGHT ARBITRAGE OPPORTUNITIES")
+        lines.append("-" * 50)
+        if onchain_candidates:
+            arb_detector = LightArbDetector()
+            enriched_pools = await arb_detector.enrich_with_arb_data(onchain_candidates)
+            arb_text = arb_detector.build_arb_text_section(enriched_pools)
+            lines.append(arb_text)
+        else:
+            lines.append("No arbitrage data available")
         lines.append("")
 
         # Cross-chain Opportunities

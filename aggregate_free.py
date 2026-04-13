@@ -59,7 +59,7 @@ async def main():
         collected_data = await aggregator.collect_all()
 
         # Build aggregate text
-        aggregate_text = aggregator.build_aggregate_text(collected_data)
+        aggregate_text = await aggregator.build_aggregate_text(collected_data)
 
         # Save to history if requested
         if args.save_history:
