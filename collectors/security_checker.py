@@ -306,3 +306,31 @@ def rugwatch_risk_score(mint_data: Dict[str, Any]) -> Dict[str, Any]:
             "decimals": 10 if (decimals > 12 or decimals < 6) else 0
         }
     }
+
+
+def check_token(token_address: str, rpc_url: str = "https://api.mainnet-beta.solana.com") -> Dict[str, Any]:
+    """
+    Check if a Solana token is safe (low risk).
+    Returns dict with 'safe' boolean and other details.
+    """
+    try:
+        raw_data = run_rugwatch_token_checks(rpc_url, token_address)
+        risk_score = rugwatch_risk_score(raw_data)
+        score = risk_score.get("risk_score", 100)
+        safe = score < 30  # LOW_RISK threshold
+
+        return {
+            "token_address": token_address,
+            "safe": safe,
+            "risk_score": score,
+            "status": risk_score.get("status", "UNKNOWN"),
+            "reasons": risk_score.get("reasons", []),
+            "raw_data": raw_data
+        }
+    except Exception as e:
+        return {
+            "token_address": token_address,
+            "safe": False,
+            "error": str(e),
+            "status": "ERROR"
+        }
