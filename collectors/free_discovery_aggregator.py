@@ -17,7 +17,9 @@ from .github_signal import (
     collect_enhanced_github_candidates,
     build_github_text_section,
     generate_coding_agent_prompt,
+    generate_coding_agent_prompt_v2,
 )
+from .github_velocity_tracker import run_github_velocity_tracker
 from .new_pools import get_new_pools
 from .cross_chain_collector import get_cross_chain_pools
 from .security_checker import SecurityChecker
@@ -51,6 +53,7 @@ class FreeDiscoveryAggregator:
             self._collect_new_pools(),
             self._collect_cross_chain_pools(),
             self._collect_onchain_liquidity(),
+            self._collect_github_velocity(),
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -61,6 +64,7 @@ class FreeDiscoveryAggregator:
         onchain_liquidity_data = (
             results[3] if not isinstance(results[3], Exception) else []
         )
+        velocity_data = results[4] if not isinstance(results[4], Exception) else []
 
         # Basic security checks for top candidates
         security_data = await self._collect_security_checks(
@@ -77,22 +81,29 @@ class FreeDiscoveryAggregator:
             generate_coding_agent_prompt(github_data) if github_data else ""
         )
 
+        # Generate velocity-based coding agent prompt
+        velocity_coding_prompt = (
+            generate_coding_agent_prompt_v2(velocity_data) if velocity_data else ""
+        )
+
         collected_data = {
             "timestamp": utc_now_iso(),
             "github_repos": github_data,
+            "github_velocity_repos": velocity_data,
             "new_pools": new_pools_data[: self.max_candidates],
             "cross_chain_pools": cross_chain_data[: self.max_candidates],
             "onchain_liquidity_candidates": onchain_liquidity_data,
             "security_results": security_data,
             "security_arb_results": security_arb_results,
             "coding_agent_prompt": coding_agent_prompt,
+            "velocity_coding_agent_prompt": velocity_coding_prompt,
         }
 
         # Save coding agent payload separately
-        self.save_coding_agent_payload(github_data)
+        self.save_coding_agent_payload(github_data, velocity_data)
 
         logger.info(
-            f"Collection complete: {len(new_pools_data)} new pools, {len(cross_chain_data)} cross-chain, {len(onchain_liquidity_data)} onchain liquidity, {len(security_data)} security checks, {len(security_arb_results)} security+arb checks"
+            f"Collection complete: {len(github_data)} github repos, {len(velocity_data)} velocity repos, {len(new_pools_data)} new pools, {len(cross_chain_data)} cross-chain, {len(onchain_liquidity_data)} onchain liquidity, {len(security_data)} security checks, {len(security_arb_results)} security+arb checks"
         )
         return collected_data
 
@@ -149,6 +160,15 @@ class FreeDiscoveryAggregator:
             )
         except Exception as e:
             logger.error(f"Onchain liquidity collection failed: {e}")
+            return []
+
+    async def _collect_github_velocity(self) -> List[Dict[str, Any]]:
+        """Collect GitHub velocity data with delta metrics"""
+        try:
+            velocity_data = await run_github_velocity_tracker(max_repos=25)
+            return velocity_data
+        except Exception as e:
+            logger.error(f"GitHub velocity collection failed: {e}")
             return []
 
     async def _collect_security_checks(
@@ -259,6 +279,14 @@ class FreeDiscoveryAggregator:
         github_text = build_github_text_section(collected_data.get("github_repos", []))
         lines.append(github_text)
         lines.append("")
+
+        # Multi-Velocity GitHub Signals
+        velocity_prompt = collected_data.get("velocity_coding_agent_prompt", "")
+        if velocity_prompt:
+            lines.append("## MULTI-VELOCITY GITHUB SIGNALS (PR-3)")
+            lines.append("-" * 50)
+            lines.append(velocity_prompt)
+            lines.append("")
 
         # Fast Liquidity Flow
         lines.append("💰 FAST LIQUIDITY FLOW (SOLANA)")
@@ -418,9 +446,11 @@ class FreeDiscoveryAggregator:
 
         return "\n".join(lines)
 
-    def save_coding_agent_payload(self, github_enriched: List[Dict[str, Any]]) -> None:
+    def save_coding_agent_payload(
+        self, github_enriched: List[Dict[str, Any]], velocity_data: List[Dict[str, Any]]
+    ) -> None:
         """Save coding agent payload for separate processing"""
-        if not github_enriched:
+        if not github_enriched and not velocity_data:
             return
 
         timestamp = utc_now_iso()
@@ -435,7 +465,12 @@ class FreeDiscoveryAggregator:
         payload_filename = f"coding_agent_payload_{timestamp_str}.json"
         payload_path = history_dir / payload_filename
         write_json(
-            payload_path, {"github_enriched": github_enriched, "timestamp": timestamp}
+            payload_path,
+            {
+                "github_enriched": github_enriched,
+                "velocity_candidates": velocity_data,
+                "timestamp": timestamp,
+            },
         )
 
         logger.info(f"Saved coding agent payload to {payload_path}")

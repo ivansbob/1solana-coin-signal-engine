@@ -341,6 +341,55 @@ def generate_coding_agent_prompt(candidates: List[Dict]) -> str:
     return "\n".join(lines)
 
 
+def generate_coding_agent_prompt_v2(velocity_candidates: List[Dict]) -> str:
+    """Улучшенный промпт для coding agents с velocity-метриками."""
+    lines = [
+        "# GitHub Velocity → Autonomous AI Agent Builder Prompt 2026",
+        "Ты — Solana AI Coding Agent (на базе ElizaOS / Solana Agent Kit / OpenClaw).",
+        "Твоя задача: превратить высок-velocity репозитории в production-ready автономных trading / liquidity / meme agents.\n",
+    ]
+
+    top_repos = sorted(
+        velocity_candidates,
+        key=lambda x: x.get("combined_velocity_score", 0),
+        reverse=True,
+    )[:8]
+
+    for repo in top_repos:
+        vel = repo.get("combined_velocity_score", 0)
+        accel = repo.get("acceleration", 0)
+        contracts = repo.get("extracted_contracts", [])  # из предыдущих PR
+
+        lines.append(f"## HIGH VELOCITY REPO: {repo.get('full_name')}")
+        lines.append(
+            f"Combined Velocity: {vel} | Acceleration: {accel} | Age: {repo.get('age_days')} days"
+        )
+        if contracts:
+            lines.append(f"Detected Contracts: {', '.join(contracts)}")
+        lines.append("Action Plan для тебя:")
+        lines.append("1. Fork репозиторий")
+        lines.append("2. Интегрируй Solana Agent Kit (60+ on-chain actions)")
+        lines.append("3. Добавь Jito bundles для execution + slippage protection")
+        lines.append(
+            "4. Реализуй monitoring loop: GitHub velocity + on-chain liquidity velocity (DexScreener)"
+        )
+        lines.append(
+            "5. Добавь entry logic: если combined_velocity > 20 и liquidity_growth_1h > 30% → open position"
+        )
+        lines.append("6. Используй evidence-weighted sizing из основной системы")
+        lines.append("7. Deploy как ElizaOS-compatible agent с persistent memory\n")
+
+    lines.append("\nOutput:")
+    lines.append("- Полный код (diff или новые файлы)")
+    lines.append("- deployment инструкция (Docker + Helius RPC)")
+    lines.append(
+        "- expected edge: daily fees / winrate на основе похожих velocity проектов"
+    )
+    lines.append("- risk controls: dev-sell monitor + rug score check")
+
+    return "\n".join(lines)
+
+
 # Пример использования в aggregator
 async def collect_github_candidates(max_candidates: int = 15):
     repos = await search_new_repos()
