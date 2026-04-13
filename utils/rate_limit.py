@@ -35,6 +35,7 @@ _LIMITERS = {
     "dex": SoftLimiter(interval_sec=_INTERVAL),
     "helius": SoftLimiter(interval_sec=_INTERVAL),
     "x": SoftLimiter(interval_sec=_INTERVAL),
+    "github": SoftLimiter(interval_sec=60.0),  # 60 req/hour for GitHub API
 }
 
 

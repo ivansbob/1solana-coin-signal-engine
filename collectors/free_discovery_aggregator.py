@@ -13,7 +13,7 @@ from utils.clock import utc_now_iso
 from utils.io import write_json
 
 # Import existing collectors
-from .github_signal import get_github_dev_score
+from .github_signal import get_github_candidates, build_github_text_section
 from .new_pools import get_new_tokens
 from .cross_chain_collector import get_new_pools_all_chains
 from .security_checker import (
@@ -74,39 +74,14 @@ class FreeDiscoveryAggregator:
         return collected_data
 
     async def _collect_github_activity(self) -> List[Dict[str, Any]]:
-        """Collect GitHub dev activity for known crypto projects"""
-        from .github_signal import SYMBOL_TO_GITHUB
-
-        symbols = list(SYMBOL_TO_GITHUB.keys())
-        tasks = []
-
-        for symbol in symbols:
-            # Rate limit GitHub API calls
-            acquire("github", blocking=False)
-            task = with_retry(get_github_dev_score, symbol, max_attempts=2)
-            tasks.append(task)
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        github_repos = []
-        for symbol, result in zip(symbols, results):
-            if isinstance(result, Exception):
-                logger.warning(f"GitHub check failed for {symbol}: {result}")
-                continue
-            if result.get("in_best_of_crypto"):
-                github_repos.append(
-                    {
-                        "symbol": symbol,
-                        "dev_score": result.get("dev_score", 0),
-                        "stars": result.get("github_stars", 0),
-                        "forks": result.get("github_forks", 0),
-                        "last_commit_days": result.get("last_commit_days_ago"),
-                    }
-                )
-
-        # Sort by dev_score descending
-        github_repos.sort(key=lambda x: x["dev_score"], reverse=True)
-        return github_repos
+        """Collect new GitHub repos with dev activity scores"""
+        try:
+            candidates = await get_github_candidates()
+            # Return the candidates directly, already sorted by pushed_at desc
+            return candidates
+        except Exception as e:
+            logger.error(f"GitHub collection failed: {e}")
+            return []
 
     async def _collect_new_pools(self) -> List[Dict[str, Any]]:
         """Collect new pools from free sources"""
@@ -204,22 +179,9 @@ class FreeDiscoveryAggregator:
         )
         lines.append("")
 
-        # GitHub Dev Activity
-        lines.append("📊 GITHUB DEV ACTIVITY")
-        lines.append("-" * 50)
-        github_repos = collected_data.get("github_repos", [])
-        if github_repos:
-            for repo in github_repos[:10]:  # Top 10
-                symbol = repo.get("symbol", "UNKNOWN")
-                score = repo.get("dev_score", 0)
-                stars = repo.get("stars", 0)
-                days = repo.get("last_commit_days")
-                days_str = f" ({days}d ago)" if days else ""
-                lines.append(
-                    f"• {symbol:<8} | Dev Score: {score:.1f} | ⭐ {stars}{days_str}"
-                )
-        else:
-            lines.append("No recent GitHub activity detected")
+        # GitHub Repos
+        github_text = build_github_text_section(collected_data.get("github_repos", []))
+        lines.append(github_text)
         lines.append("")
 
         # Fast Liquidity Flow
