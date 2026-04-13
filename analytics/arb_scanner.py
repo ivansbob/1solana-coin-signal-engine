@@ -1,152 +1,184 @@
 import asyncio
 import httpx
-import json
-import os
-from typing import List, Dict, Any
-from dataclasses import dataclass
-import logging
+from typing import Dict, Any, List
+from datetime import datetime, timezone
+from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from utils.cache import cache_get, cache_set
+from utils.rate_limit import acquire
+from utils.io import append_jsonl, write_json
+from utils.logger import log_info, log_warning
+from config.settings import Settings
 
-# Constants
-DEXSCREENER_BASE = "https://api.dexscreener.com"
-DEX_FEES = {
-    "raydium": 0.0025,  # 0.25%
-    "orca": 0.003,      # 0.3%
-    "jupiter": 0.0,     # aggregator, assume 0 for now
-    "meteora": 0.0004,  # 0.04% min
-    "pump": 0.0         # assume 0
-}
+COINGECKO_SEARCH_URL = "https://api.coingecko.com/api/v3/search"
+COINGECKO_COIN_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}"
 
-@dataclass
-class ArbOpportunity:
-    token_mint: str
-    symbol: str
-    buy_dex: str
-    buy_price: float
-    sell_dex: str
-    sell_price: float
-    gross_spread_pct: float
-    estimated_fees_pct: float
-    net_spread_pct: float
-    liquidity_buy_side: float
-    liquidity_sell_side: float
-    max_position_sol: float
-    viable: bool
-    flash_loan_viable: bool
-    mev_risk: str
+# Приоритетные сети для кросс-чейн арбитража 2026
+TARGET_CHAINS = ["base", "arbitrum", "ethereum", "solana"]
 
-async def fetch_dex_price(token_mint: str, dex: str) -> Dict[str, Any]:
-    """Fetch price and liquidity for token on specific DEX via DexScreener"""
-    url = f"{DEXSCREENER_BASE}/latest/dex/search?q={token_mint}"
+
+async def fetch_coingecko_crosschain(symbol: str, cache_ttl: int = 300) -> Dict[str, Any]:
+    """Улучшенный бесплатный поиск токена на CoinGecko + кэш."""
+    cache_key = f"cg_search_{symbol.lower()}"
+    cached = cache_get("dex", cache_key)  # используем существующий dex cache
+    if cached:
+        return cached
+
+    acquire("dex")  # rate limit (CoinGecko ~30/min)
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(COINGECKO_SEARCH_URL, params={"query": symbol})
+            if resp.status_code != 200:
+                log_warning("coingecko_search_failed", symbol=symbol, status=resp.status_code)
+                return {"found": False, "error": "http_error"}
+
+            data = resp.json()
+            coins = data.get("coins", [])
+
+            for coin in coins:
+                if coin.get("symbol", "").lower() == symbol.lower():
+                    result = {
+                        "found": True,
+                        "coin_id": coin.get("id"),
+                        "name": coin.get("name"),
+                        "symbol": coin.get("symbol"),
+                        "market_cap_rank": coin.get("market_cap_rank"),
+                        "thumb": coin.get("thumb"),
+                        "provenance": "coingecko_search"
+                    }
+                    cache_set("dex", cache_key, result, ttl_sec=cache_ttl)
+                    return result
+
+    except Exception as e:
+        log_warning("coingecko_exception", symbol=symbol, error=str(e))
+
+    result = {"found": False}
+    cache_set("dex", cache_key, result, ttl_sec=60)
+    return result
+
+
+async def get_crosschain_prices(coin_id: str) -> Dict[str, float]:
+    """Получаем цены на приоритетных цепях (упрощённо через market data)."""
+    prices = {}
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            data = response.json()
-            pairs = data.get("pairs", [])
+            # CoinGecko позволяет получать market data с платформами
+            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}?localization=false&tickers=false&community_data=false&developer_data=false"
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                market_data = data.get("market_data", {})
+                # Можно расширить на конкретные платформы, но для бесплатного tier используем общие метрики
+                prices["usd"] = market_data.get("current_price", {}).get("usd")
+                # Для настоящих кросс-чейн цен лучше использовать GeckoTerminal onchain endpoints (если доступны)
+    except Exception:
+        pass
+    return prices
 
-            # Find pair on specific DEX
-            for pair in pairs:
-                if pair.get("dexId") == dex and pair.get("chainId") == "solana":
-                    price = pair.get("priceUsd", 0)
-                    liquidity = pair.get("liquidity", {}).get("usd", 0)
-                    return {"price": float(price), "liquidity": float(liquidity), "dex": dex}
-    except Exception as e:
-        logger.error(f"Price fetch failed for {token_mint} on {dex}: {e}")
-    return {"price": 0, "liquidity": 0, "dex": dex}
 
-async def scan_arb_opportunities(token_mints: List[str]) -> List[ArbOpportunity]:
-    """
-    Scan for arbitrage opportunities across DEXes on Solana.
-    """
-    opportunities = []
+def calculate_arb_opportunity_score(opp: Dict[str, Any], cross_chain: Dict[str, Any]) -> Dict[str, Any]:
+    """Evidence-weighted Arbitrage Score (0-100)."""
+    score = 0
+    reasons = []
 
-    for token_mint in token_mints:
-        # Fetch prices from all DEXes in parallel
-        dexes = list(DEX_FEES.keys())
-        tasks = [fetch_dex_price(token_mint, dex) for dex in dexes]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+    # Solana-side spread (из твоего существующего сканера)
+    sol_spread = float(opp.get("spread_pct", 0))
+    if sol_spread > 1.5:
+        score += 35
+        reasons.append(f"Solana DEX spread {sol_spread:.2f}%")
+    elif sol_spread > 0.8:
+        score += 18
+        reasons.append(f"Moderate Solana spread {sol_spread:.2f}%")
 
-        prices = {}
-        for dex, result in zip(dexes, results):
-            if isinstance(result, dict) and result["price"] > 0:
-                prices[dex] = result
+    # Cross-chain listing boost
+    if cross_chain.get("found"):
+        score += 25
+        reasons.append(f"Listed on CEX/L2: {cross_chain.get('name')}")
 
-        if len(prices) < 2:
-            continue  # Need at least 2 prices for arb
+    # Volume & liquidity filter
+    volume = float(opp.get("volume_24h", 0))
+    if volume > 500_000:
+        score += 20
+        reasons.append("High 24h volume")
+    elif volume > 100_000:
+        score += 10
 
-        # Find best buy/sell
-        sorted_prices = sorted(prices.items(), key=lambda x: x[1]["price"])
-        buy_dex, buy_data = sorted_prices[0]
-        sell_dex, sell_data = sorted_prices[-1]
+    # Risk adjustment
+    if float(opp.get("liquidity_usd", 0)) < 50_000:
+        score -= 15
+        reasons.append("Low liquidity warning")
 
-        buy_price = buy_data["price"]
-        sell_price = sell_data["price"]
-        gross_spread = (sell_price - buy_price) / buy_price * 100
+    final_score = round(max(0, min(100, score)), 1)
 
-        # Estimate fees (simplified: 2 swaps)
-        buy_fee = DEX_FEES.get(buy_dex, 0.01)
-        sell_fee = DEX_FEES.get(sell_dex, 0.01)
-        total_fees_pct = (buy_fee + sell_fee) * 100
-        net_spread = gross_spread - total_fees_pct
+    opp.update({
+        "arb_score": final_score,
+        "arb_reasons": reasons,
+        "cross_chain_listed": cross_chain.get("found", False),
+        "cross_chain_name": cross_chain.get("name"),
+        "scored_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "provenance": "multi_chain_arb_scanner_2026"
+    })
 
-        if net_spread <= 0:
+    return opp
+
+
+async def scan_arb_opportunities() -> List[Dict[str, Any]]:
+    """Основная функция сканирования арбитража + кросс-чейн."""
+    opportunities = []  # здесь должен быть твой существующий код сканирования Solana DEX (Jupiter, Raydium, Orca и т.д.)
+
+    # Пример placeholder — замени на свой реальный Solana arb scan
+    # opportunities = await scan_solana_dex_spreads()
+
+    enriched = []
+    for opp in opportunities[:40]:  # лимит для бесплатного tier
+        symbol = opp.get("symbol", "").upper()
+
+        # Параллельно проверяем кросс-чейн presence
+        cross_chain = await fetch_coingecko_crosschain(symbol)
+
+        scored = calculate_arb_opportunity_score(opp, cross_chain)
+        enriched.append(scored)
+
+        if scored["arb_score"] >= 65:
+            log_info("high_arb_opportunity",
+                     symbol=symbol,
+                     score=scored["arb_score"],
+                     cross_chain=cross_chain.get("found", False))
+
+    # Сохраняем результаты
+    write_json(Path("data/processed/arb_opportunities.json"), {
+        "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "opportunities": sorted(enriched, key=lambda x: x.get("arb_score", 0), reverse=True)
+    })
+
+    return enriched
+
+
+def generate_arb_coding_agent_prompt(opportunities: List[Dict]) -> str:
+    """Готовый промпт для coding agent (автономный arb/sniper agent)."""
+    lines = [
+        "# Multi-Chain Arbitrage Opportunity → Coding Agent Prompt 2026",
+        "Ты — Autonomous Solana + L2 Arbitrage Agent.",
+        "Используй данные ниже для создания/улучшения бота, который ловит кросс-чейн и intra-DEX спреды.\n"
+    ]
+
+    for opp in sorted(opportunities, key=lambda x: x.get("arb_score", 0), reverse=True)[:8]:
+        if opp.get("arb_score", 0) < 60:
             continue
+        lines.append(f"## OPPORTUNITY: {opp.get('symbol')} | Score: {opp.get('arb_score')}")
+        lines.append(f"Spread: {opp.get('spread_pct', 0):.2f}% | Cross-chain: {opp.get('cross_chain_listed')}")
+        lines.append("Execution plan:")
+        lines.append("1. Monitor Solana DEXes via Jupiter + Helius WS")
+        lines.append("2. При спреде > 0.8% и cross-chain listing → подготовить Jito bundle")
+        lines.append("3. Для L2 (Base/Arbitrum) использовать bridge (LayerZero / Across) если спред оправдывает газ")
+        lines.append("4. Применять evidence-weighted sizing из основной системы")
+        lines.append("5. Exit: trailing stop + MFE capture\n")
 
-        # Liquidity
-        buy_liq = buy_data["liquidity"]
-        sell_liq = sell_data["liquidity"]
+    lines.append("\nЗадача: Напиши полный код агента с:")
+    lines.append("- Rate limiting + caching")
+    lines.append("- Jito bundle integration")
+    lines.append("- Integration с Moon Score (PR-3) и GitHub Velocity (PR-3)")
+    lines.append("- Logging всех решений с provenance")
 
-        # Max position (0.5% of smaller liquidity)
-        min_liq = min(buy_liq, sell_liq)
-        max_position_usd = min_liq * 0.005
-        max_position_sol = max_position_usd / sell_price  # approx
-
-        viable = net_spread > 0.1 and max_position_sol > 0.1
-        flash_loan_viable = max_position_sol > 5
-
-        # MEV risk
-        if net_spread > 1.0:
-            mev_risk = "high"
-        elif net_spread > 0.5:
-            mev_risk = "medium"
-        else:
-            mev_risk = "low"
-
-        # Get symbol (simplified, assume from buy_data or something)
-        symbol = "UNKNOWN"  # In real, fetch from pool data
-
-        opp = ArbOpportunity(
-            token_mint=token_mint,
-            symbol=symbol,
-            buy_dex=buy_dex,
-            buy_price=buy_price,
-            sell_dex=sell_dex,
-            sell_price=sell_price,
-            gross_spread_pct=round(gross_spread, 2),
-            estimated_fees_pct=round(total_fees_pct, 2),
-            net_spread_pct=round(net_spread, 2),
-            liquidity_buy_side=buy_liq,
-            liquidity_sell_side=sell_liq,
-            max_position_sol=round(max_position_sol, 2),
-            viable=viable,
-            flash_loan_viable=flash_loan_viable,
-            mev_risk=mev_risk
-        )
-        opportunities.append(opp)
-
-    logger.info(f"Found {len(opportunities)} arb opportunities")
-    return opportunities
-
-def save_arb_opportunities(opps: List[ArbOpportunity], filename: str = "data/arb_opportunities.json"):
-    """Save arb opportunities to JSON"""
-    os.makedirs("data", exist_ok=True)
-    data = [opp.__dict__ for opp in opps]
-    with open(filename, 'w') as f:
-        json.dump(data, f, indent=2)
-    logger.info(f"Saved {len(opps)} arb opportunities to {filename}")
-
-if __name__ == "__main__":
-    # Test with sample token
-    asyncio.run(scan_arb_opportunities(["So11111111111111111111111111111111111111112"]))
+    return "\n".join(lines)

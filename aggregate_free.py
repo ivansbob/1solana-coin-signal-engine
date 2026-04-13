@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from collectors.free_discovery_aggregator import FreeDiscoveryAggregator
 from collectors.moon_score_engine import calculate_moon_score   # ← Новый импорт
+from analytics.arb_scanner import scan_arb_opportunities, generate_arb_coding_agent_prompt  # ← Arb scanner import
 
 # Setup logging
 logging.basicConfig(
@@ -55,14 +56,11 @@ async def main():
             high_moon = [t for t in collected_data["new_pools"] if t.get("moon_score", 0) >= 70]
             logger.info(f"Found {len(high_moon)} high-potential tokens (Moon Score ≥ 70)")
 
-        # ====================== BUILD AGGREGATE TEXT ======================
-        aggregate_text = await aggregator.build_aggregate_text(collected_data)
-
-        # Добавляем Moon Score Summary в начало отчёта
-        moon_summary = "\n## MOON SCORE SUMMARY (Zero-LLM Heuristic)\n"
-        moon_summary += f"Total tokens analyzed: {len(collected_data.get('new_pools', []))}\n"
-        moon_summary += f"High Moon Score (≥70): {len([t for t in collected_data.get('new_pools', []) if t.get('moon_score', 0) >= 70])}\n\n"
-        aggregate_text = moon_summary + aggregate_text
+        # ====================== ARB SCANNER ======================
+        logger.info("Scanning for arbitrage opportunities...")
+        arb_opportunities = await scan_arb_opportunities()
+        collected_data["arb_opportunities"] = arb_opportunities
+        logger.info(f"Found {len(arb_opportunities)} arbitrage opportunities")
 
         # ====================== BUILD AGGREGATE TEXT ======================
         aggregate_text = await aggregator.build_aggregate_text(collected_data)
@@ -72,6 +70,11 @@ async def main():
         moon_summary += f"Total tokens analyzed: {len(collected_data.get('new_pools', []))}\n"
         moon_summary += f"High Moon Score (≥70): {len([t for t in collected_data.get('new_pools', []) if t.get('moon_score', 0) >= 70])}\n\n"
         aggregate_text = moon_summary + aggregate_text
+
+        # Добавляем Arb Coding Agent Prompt
+        if arb_opportunities:
+            arb_prompt = generate_arb_coding_agent_prompt(arb_opportunities)
+            aggregate_text += "\n\n" + arb_prompt
 
         # ====================== SAVE HISTORY AND OUTPUT ======================
         if args.save_history:

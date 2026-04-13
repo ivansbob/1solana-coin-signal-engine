@@ -437,6 +437,21 @@ class FreeDiscoveryAggregator:
             lines.append("No security checks performed")
         lines.append("")
 
+        # Arbitrage Opportunities
+        lines.append("🔄 ARBITRAGE OPPORTUNITIES")
+        lines.append("-" * 50)
+        arb_opps = collected_data.get("arb_opportunities", [])
+        if arb_opps:
+            for opp in sorted(arb_opps, key=lambda x: x.get("arb_score", 0), reverse=True)[:10]:  # Top 10
+                symbol = opp.get("symbol", "UNKNOWN")[:8]
+                score = opp.get("arb_score", 0)
+                spread = opp.get("spread_pct", 0)
+                cross_chain = "Yes" if opp.get("cross_chain_listed") else "No"
+                lines.append(f"• {symbol:<8} | Score: {score:.1f} | Spread: {spread:.2f}% | Cross-chain: {cross_chain}")
+        else:
+            lines.append("No arbitrage opportunities detected")
+        lines.append("")
+
         # Metrics Summary
         lines.append("📈 KEY METRICS SUMMARY")
         lines.append("-" * 50)
