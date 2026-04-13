@@ -78,7 +78,7 @@ def normalize_pool_data(source: str, pool: Dict[str, Any]) -> Dict[str, Any]:
         "timestamp": now.isoformat()
     }
 
-async def get_new_tokens() -> List[Dict[str, Any]]:
+async def get_new_pools() -> List[Dict[str, Any]]:
     """Get new tokens from multiple sources"""
     logger.info("Fetching new pools from DexScreener and CoinGecko...")
 

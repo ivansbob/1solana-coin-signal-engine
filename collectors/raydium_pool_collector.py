@@ -264,7 +264,7 @@ async def run_collector():
         await save_pools_to_file()
 
 
-def get_recent_pools(limit: int = 50) -> List[Dict[str, Any]]:
+async def get_raydium_pools(limit: int = 50) -> List[Dict[str, Any]]:
     """Get list of recent pools from the last 24 hours with full data"""
     try:
         if not os.path.exists("data/new_pools_raw.json"):
@@ -280,6 +280,10 @@ def get_recent_pools(limit: int = 50) -> List[Dict[str, Any]]:
             try:
                 pool_time = datetime.fromisoformat(pool["timestamp"])
                 if pool_time > cutoff:
+                    # Add missing fields for compatibility
+                    pool.setdefault("age_minutes", 0)
+                    pool.setdefault("volume_1h", 0.0)
+                    pool.setdefault("liquidity_usd", pool.get("liquidity_sol", 0) * 200)  # rough SOL to USD
                     recent_pools.append(pool)
             except:
                 continue

@@ -31,7 +31,7 @@ async def fetch_coingecko_new_pools(chain: str) -> List[Dict[str, Any]]:
         logger.error(f"CoinGecko {chain} fetch failed: {e}")
         return []
 
-async def get_new_pools_all_chains(min_liquidity: float = 5000) -> List[Dict[str, Any]]:
+async def get_cross_chain_pools(min_liquidity: float = 5000) -> List[Dict[str, Any]]:
     """
     Get new pools from all chains via CoinGecko Onchain API.
     Free, no key required (may have rate limits).

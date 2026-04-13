@@ -267,3 +267,26 @@ def normalize_pair(
         "discovery_source_mode": discovery_source_mode,
         "discovery_source_confidence": discovery_source_confidence,
     }
+
+
+class DexScreenerClient:
+    async def get_trending_pairs(self, limit: int = 15) -> list[dict[str, Any]]:
+        """Get trending pairs from DexScreener"""
+        import asyncio
+        import httpx
+
+        # This is a simplified implementation - in practice, you'd use DexScreener's trending API
+        # For now, we'll use the existing fetch functions
+        # Note: fetch_latest_solana_pairs is sync, so we run it in thread pool
+        pairs = await asyncio.get_event_loop().run_in_executor(None, fetch_latest_solana_pairs)
+        # Normalize to expected format
+        normalized = []
+        for pair in pairs[:limit]:
+            norm = normalize_pair(pair)
+            if norm:
+                # Add required fields
+                norm.setdefault("age_minutes", 0)
+                norm.setdefault("volume_1h", norm.get("volume_h1", 0))
+                norm.setdefault("liquidity_usd", norm.get("liquidity_usd", 0))
+                normalized.append(norm)
+        return normalized
