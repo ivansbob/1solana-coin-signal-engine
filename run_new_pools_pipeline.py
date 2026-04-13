@@ -74,17 +74,27 @@ async def run_pipeline(dry_run: bool = False) -> None:
         source = pool_data.get(token, {}).get('source', 'unknown')
         logger.info(f"Checking token: {token} (source: {source})")
         try:
-            result = await asyncio.to_thread(check_token, token, source=source)
+            result = await check_token(token, source=source)
             return token, result
         except Exception as e:
             logger.error(f"Error checking token {token}: {e}")
             return token, None
 
-    # Run all checks in parallel
-    tasks = [check_single_token(token) for token in all_tokens]
-    results = await asyncio.gather(*tasks)
+    # Run all checks in parallel with rate limiting
+    semaphore = asyncio.Semaphore(10)  # Limit to 10 concurrent requests to avoid RPC limits
 
-    for token, check_result in results:
+    async def check_with_limit(token):
+        async with semaphore:
+            return await check_single_token(token)
+
+    tasks = [check_with_limit(token) for token in all_tokens]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(f"Task failed with exception: {result}")
+            continue
+        token, check_result = result
         if check_result is None:
             continue
         if check_result.get('safe'):

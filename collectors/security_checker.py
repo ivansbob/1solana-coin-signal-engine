@@ -1,4 +1,4 @@
-import requests
+import httpx
 import re
 import json
 import os
@@ -76,7 +76,7 @@ def detect_honeypot(source_code: str) -> Dict[str, Any]:
     }
 
 
-def fetch_contract_source(address: str, chain: str = "ethereum", etherscan_api_key: str = "") -> Optional[str]:
+async def fetch_contract_source(address: str, chain: str = "ethereum", etherscan_api_key: str = "") -> Optional[str]:
     chain_configs = {
         "ethereum": 1, "eth": 1,
         "polygon": 137, "matic": 137,
@@ -97,25 +97,26 @@ def fetch_contract_source(address: str, chain: str = "ethereum", etherscan_api_k
     if etherscan_api_key:
         url += f"&apikey={etherscan_api_key}"
 
-    try:
-        resp = requests.get(url, timeout=15)
-        if resp.status_code != 200:
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(url, timeout=15)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if str(data.get("status")) != "1" or not data.get("result"):
+                return None
+
+            result = data["result"][0]
+            source = result.get("SourceCode")
+            if not source:
+                return None
+
+            return parse_source_code(source)
+        except Exception:
             return None
-        data = resp.json()
-        if str(data.get("status")) != "1" or not data.get("result"):
-            return None
-
-        result = data["result"][0]
-        source = result.get("SourceCode")
-        if not source:
-            return None
-
-        return parse_source_code(source)
-    except Exception:
-        return None
 
 
-def honeypot_check_teycir(
+async def honeypot_check_teycir(
     token_address: str,
     chain: str = "ethereum",
     etherscan_api_key: str = ""
@@ -136,7 +137,7 @@ def honeypot_check_teycir(
     }
 
     try:
-        source_code = fetch_contract_source(token_address, chain, etherscan_api_key)
+        source_code = await fetch_contract_source(token_address, chain, etherscan_api_key)
 
         if not source_code:
             result.update({
@@ -181,6 +182,12 @@ if __name__ == "__main__":
     risk = rugwatch_risk_score(rugwatch_result, "unknown")
     print("\nRisk score:")
     print(json.dumps(risk, indent=2, ensure_ascii=False))
+
+    # Test Honeypot (async)
+    import asyncio
+    result = asyncio.run(honeypot_check_teycir("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", chain="ethereum", etherscan_api_key=key))
+    print("\nHoneypot result:")
+    print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 # ==================== RUGWATCH INTEGRATION (Solana) ====================
@@ -328,7 +335,7 @@ def rugwatch_risk_score(mint_data: Dict[str, Any], source: str = "unknown") -> D
     }
 
 
-def check_token(token_address: str, rpc_url: str = "https://api.mainnet-beta.solana.com", source: str = "unknown") -> Dict[str, Any]:
+async def check_token(token_address: str, rpc_url: str = "https://api.mainnet-beta.solana.com", source: str = "unknown") -> Dict[str, Any]:
     """
     Check if a Solana token is safe (low risk).
     Returns dict with 'safe' boolean and other details.
