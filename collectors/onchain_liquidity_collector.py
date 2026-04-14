@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 from utils.cache import cache_get, cache_set
-from utils.rate_limit import acquire
+from utils.rate_limit import async_acquire, acquire
 from utils.retry import with_retry
 from utils.clock import utc_now_iso
 
@@ -45,7 +45,7 @@ class OnchainLiquidityCollector:
         if cached:
             return cached
 
-        await acquire("dex")
+        await async_acquire("dex")
 
         # 1. Solana новые пулы (твои существующие коллекторы)
         solana_pools = await get_new_pools() or []
