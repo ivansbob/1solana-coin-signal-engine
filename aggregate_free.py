@@ -10,6 +10,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
+load_dotenv()
+
 from collectors.free_discovery_aggregator import FreeDiscoveryAggregator
 from collectors.moon_score_engine import calculate_moon_score   # ← Новый импорт
 from analytics.arb_scanner import scan_arb_opportunities, generate_arb_coding_agent_prompt  # ← Arb scanner import
@@ -28,7 +30,6 @@ async def main():
     parser.add_argument("--output-dir", type=str, default=".")
 
     args = parser.parse_args()
-    load_dotenv()
 
     logger.info(f"Starting Free Discovery Aggregation with Moon Score Engine (max={args.max_candidates})")
 

@@ -7,8 +7,11 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import aiohttp
 from dotenv import load_dotenv
+from config.settings import load_settings
 
 load_dotenv()
+
+settings = load_settings()
 
 # Constants
 RAYDIUM_FEE_ADDRESS = "7YttLkHDoNj9wyDur5pM1ejNaAvT9X4eqaYcHQqtj2G5"
@@ -171,8 +174,15 @@ async def process_log_message(message: Dict[str, Any], session: aiohttp.ClientSe
 
 async def websocket_listener():
     """Main websocket listener for Raydium logs"""
-    ws_url = os.getenv("SOLANA_RPC_WS", "wss://api.mainnet-beta.solana.com")
-    rpc_url = os.getenv("SOLANA_RPC_HTTP", "https://api.mainnet-beta.solana.com")
+    # Use Helius RPC as primary provider if API key is available
+    if settings.HELIUS_API_KEY:
+        ws_url = f"wss://mainnet.helius-rpc.com/?api-key={settings.HELIUS_API_KEY}"
+        rpc_url = f"https://mainnet.helius-rpc.com/?api-key={settings.HELIUS_API_KEY}"
+        logger.info("Using Helius RPC for Raydium data fetching")
+    else:
+        ws_url = os.getenv("SOLANA_RPC_WS", "wss://api.mainnet-beta.solana.com")
+        rpc_url = os.getenv("SOLANA_RPC_HTTP", "https://api.mainnet-beta.solana.com")
+        logger.warning("HELIUS_API_KEY not found, falling back to public Solana RPC")
 
     logger.info(f"Connecting to Solana websocket: {ws_url}")
 
