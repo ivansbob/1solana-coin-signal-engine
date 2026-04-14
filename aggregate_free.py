@@ -82,6 +82,15 @@ async def main():
 
         output_dir = Path(args.output_dir)
         output_dir.mkdir(exist_ok=True)
+
+        # Создаем директории и файлы-заглушки для реестров смарт-кошельков
+        registry_dir = Path("data/registry")
+        registry_dir.mkdir(parents=True, exist_ok=True)
+
+        raw_wallets_path = Path("data/smart_wallets.raw.json")
+        if not raw_wallets_path.exists():
+            raw_wallets_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_wallets_path.write_text("[]")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = output_dir / f"daily_aggregate_moon_{timestamp}.txt"
 
