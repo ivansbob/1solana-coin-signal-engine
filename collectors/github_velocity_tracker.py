@@ -7,7 +7,7 @@ from typing import Dict, Any, List
 import aiohttp
 
 from utils.io import read_jsonl, append_jsonl, write_json, ensure_dir
-from utils.rate_limit import acquire
+from utils.rate_limit import async_acquire
 from utils.retry import with_retry
 from config.settings import Settings
 
@@ -27,7 +27,7 @@ async def fetch_repos(keywords: List[str], max_repos: int = 30) -> List[Dict]:
     )
     params = {"q": query, "sort": "updated", "order": "desc", "per_page": max_repos}
 
-    await acquire("github")
+    await async_acquire("github")
     async with aiohttp.ClientSession() as session:
         async with session.get(GITHUB_SEARCH_URL, params=params) as resp:
             if resp.status != 200:

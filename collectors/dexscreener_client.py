@@ -290,3 +290,17 @@ class DexScreenerClient:
                 norm.setdefault("liquidity_usd", norm.get("liquidity_usd", 0))
                 normalized.append(norm)
         return normalized
+
+    async def get_pairs_by_token(self, token_address: str) -> list[dict[str, Any]]:
+        """Fetch specific token pairs to avoid missing method error."""
+        import httpx
+        url = f"https://api.dexscreener.com/latest/dex/search?q={token_address}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    pairs = resp.json().get("pairs", [])
+                    return[normalize_pair(p) for p in pairs if isinstance(p, dict)]
+        except Exception:
+            pass
+        return[]

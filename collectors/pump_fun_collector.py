@@ -24,15 +24,26 @@ SCAM_FILTERS = ["dev", "team", "tax", "renounced", "locked", "burned"]  # кос
 
 
 async def fetch_pump_fun_coins() -> List[Dict]:
-    """Получаем актуальные токены, отсортированные по последней торговле."""
-    await async_acquire("dex")  # используем существующий rate limiter
+    """Получаем актуальные токены в обход Cloudflare."""
+    await async_acquire("dex")
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Origin": "https://pump.fun",
+        "Referer": "https://pump.fun/"
+    }
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(PUMP_FUN_API_URL) as resp:
-            if resp.status != 200:
-                print(f"Pump.fun API error: {resp.status}")
-                return []
-            return await resp.json()
+    async with aiohttp.ClientSession(headers=headers) as session:
+        try:
+            async with session.get(PUMP_FUN_API_URL) as resp:
+                if resp.status != 200:
+                    print(f"Pump.fun API error: {resp.status}")
+                    return[]
+                return await resp.json()
+        except Exception as e:
+            print(f"Pump.fun connection error: {e}")
+            return[]
 
 
 def calculate_graduation_score(coin: Dict[str, Any]) -> Dict[str, Any]:

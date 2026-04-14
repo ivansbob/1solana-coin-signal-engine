@@ -16,7 +16,7 @@ MAX_AGE_MINUTES = 180
 
 async def fetch_dexscreener_pairs(limit: int = 200) -> List[Dict[str, Any]]:
     """Fetch latest pairs from DexScreener"""
-    url = f"{DEXSCREENER_BASE}/latest/dex/pairs?chainId=solana"
+    url = f"{DEXSCREENER_BASE}/latest/dex/search/?q=solana"
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(url)
@@ -119,7 +119,7 @@ def save_to_file(pools: List[Dict[str, Any]], filename: str = "data/new_pools_ra
 
 if __name__ == "__main__":
     # Test run
-    pools = asyncio.run(get_new_tokens())
+    pools = asyncio.run(get_new_pools())
     print(f"Retrieved {len(pools)} pools")
     for pool in pools[:5]:  # Print first 5
         print(pool)

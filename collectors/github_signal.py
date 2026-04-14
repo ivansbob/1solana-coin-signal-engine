@@ -97,9 +97,10 @@ async def search_new_repos() -> List[Dict]:
         headers["Authorization"] = f"token {token}"
 
     async with aiohttp.ClientSession(headers=headers) as session:
+        top_keywords = KEYWORDS[:5] # Обрезаем, чтобы влезть в лимит 256 символов
         query = (
-            " ".join(KEYWORDS)
-            + " language:Rust OR language:TypeScript OR language:Python created:>="
+            " OR ".join(top_keywords)
+            + " language:Rust created:>="
             + time.strftime(
                 "%Y-%m-%d", time.gmtime(time.time() - LOOKBACK_HOURS * 3600)
             )
