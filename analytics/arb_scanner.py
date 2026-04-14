@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from utils.cache import cache_get, cache_set
-from utils.rate_limit import acquire
+from utils.rate_limit import async_acquire
 from utils.io import append_jsonl, write_json
 from utils.logger import log_info, log_warning
 from config.settings import Settings
@@ -24,7 +24,7 @@ async def fetch_coingecko_crosschain(symbol: str, cache_ttl: int = 300) -> Dict[
     if cached:
         return cached
 
-    acquire("dex")  # rate limit (CoinGecko ~30/min)
+    await async_acquire("dex")  # rate limit (CoinGecko ~30/min)
 
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
@@ -123,34 +123,33 @@ def calculate_arb_opportunity_score(opp: Dict[str, Any], cross_chain: Dict[str, 
     return opp
 
 
-async def scan_arb_opportunities() -> List[Dict[str, Any]]:
+async def scan_arb_opportunities(base_opportunities: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Основная функция сканирования арбитража + кросс-чейн."""
-    opportunities = []  # здесь должен быть твой существующий код сканирования Solana DEX (Jupiter, Raydium, Orca и т.д.)
+    opportunities = base_opportunities or []
+    enriched =[]
 
-    # Пример placeholder — замени на свой реальный Solana arb scan
-    # opportunities = await scan_solana_dex_spreads()
+    # Если на вход ничего не дали, возвращаем пустой список, чтобы не крашнуться
+    if not opportunities:
+        return enriched
 
-    enriched = []
     for opp in opportunities[:40]:  # лимит для бесплатного tier
         symbol = opp.get("symbol", "").upper()
+        if not symbol:
+            continue
 
         # Параллельно проверяем кросс-чейн presence
         cross_chain = await fetch_coingecko_crosschain(symbol)
-
         scored = calculate_arb_opportunity_score(opp, cross_chain)
         enriched.append(scored)
 
-        if scored["arb_score"] >= 65:
-            log_info("high_arb_opportunity",
-                     symbol=symbol,
-                     score=scored["arb_score"],
-                     cross_chain=cross_chain.get("found", False))
+        if scored.get("arb_score", 0) >= 65:
+            log_info("high_arb_opportunity", symbol=symbol, score=scored["arb_score"], cross_chain=cross_chain.get("found", False))
 
-    # Сохраняем результаты
-    write_json(Path("data/processed/arb_opportunities.json"), {
-        "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "opportunities": sorted(enriched, key=lambda x: x.get("arb_score", 0), reverse=True)
-    })
+    if enriched:
+        write_json(Path("data/processed/arb_opportunities.json"), {
+            "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "opportunities": sorted(enriched, key=lambda x: x.get("arb_score", 0), reverse=True)
+        })
 
     return enriched
 
