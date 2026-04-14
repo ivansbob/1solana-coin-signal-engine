@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 # Constants
 DEXSCREENER_BASE = "https://api.dexscreener.com"
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
-MIN_LIQUIDITY_USD = 1000
+MIN_LIQUIDITY_USD = 500  # Relaxed threshold for new tokens
 MAX_AGE_MINUTES = 180
 
 async def fetch_dexscreener_pairs(limit: int = 200) -> List[Dict[str, Any]]:
@@ -37,9 +37,26 @@ def normalize_pool_data(source: str, pool: Dict[str, Any]) -> Dict[str, Any]:
     if source == "dexscreener":
         base_token = pool.get("baseToken", {})
         quote_token = pool.get("quoteToken", {})
-        token_address = base_token.get("address", "")
-        symbol = base_token.get("symbol", "UNKNOWN")
-        name = base_token.get("name", "")
+
+        # Fix inversion: if baseToken is SOL/WSOL, use quoteToken as the target meme coin
+        if str(base_token.get("symbol", "")).upper() in ("SOL", "WSOL"):
+            target_token = quote_token
+            token_address = quote_token.get("address", "")
+            symbol = quote_token.get("symbol", "UNKNOWN")
+            name = quote_token.get("name", "")
+        else:
+            target_token = base_token
+            token_address = base_token.get("address", "")
+            symbol = base_token.get("symbol", "UNKNOWN")
+            name = base_token.get("name", "")
+
+        # Hard-ban EVM addresses
+        if token_address.startswith("0x"):
+            return {}
+
+        # Ensure Solana address format
+        if not (32 <= len(token_address) <= 44 and token_address.replace('_', '').isalnum()):
+            return {}
         pair_address = pool.get("pairAddress", "")
         dex = pool.get("dexId", "unknown")
         liquidity_usd = pool.get("liquidity", {}).get("usd", 0.0)
@@ -101,10 +118,10 @@ async def get_new_pools() -> List[Dict[str, Any]]:
             seen.add(token)
             unique_pools.append(pool)
 
-    # Apply filters
+    # Apply filters: allow tokens with age < 5 minutes to pass even if liquidity low
     filtered_pools = [
         pool for pool in unique_pools
-        if pool["liquidity_usd"] > MIN_LIQUIDITY_USD and pool["age_minutes"] < MAX_AGE_MINUTES and pool["symbol"] != "UNKNOWN"
+        if (pool["liquidity_usd"] > MIN_LIQUIDITY_USD or pool["age_minutes"] < 5) and pool["age_minutes"] < MAX_AGE_MINUTES and pool["symbol"] != "UNKNOWN"
     ]
 
     logger.info(f"Found {len(filtered_pools)} filtered new pools")

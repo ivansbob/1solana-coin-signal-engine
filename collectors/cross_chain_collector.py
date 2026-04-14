@@ -11,10 +11,7 @@ logger = logging.getLogger(__name__)
 # Constants
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 CHAINS = {
-    "solana": "solana",
-    "base": "base",
-    "arbitrum": "arbitrum",
-    "ethereum": "eth"
+    "solana": "solana"
 }
 MIN_LIQUIDITY = 5000
 
@@ -47,6 +44,13 @@ async def get_cross_chain_pools(min_liquidity: float = 5000) -> List[Dict[str, A
             logger.error(f"Error fetching {chain}: {pools}")
             continue
         for pool in pools:
+            # Hard-ban EVM addresses for Solana engine
+            token_address = pool.get("attributes", {}).get("address", "")
+            if token_address.startswith("0x"):
+                continue
+            # Ensure Solana address format (Base58, length 32-44)
+            if not (32 <= len(token_address) <= 44 and token_address.replace('_', '').isalnum()):
+                continue
             pool["chain"] = chain
             all_pools.append(pool)
 
@@ -102,4 +106,4 @@ def save_to_file(pools: List[Dict[str, Any]], filename: str = "data/cross_chain_
 
 if __name__ == "__main__":
     # Test
-    asyncio.run(get_new_pools_all_chains())
+    asyncio.run(get_cross_chain_pools())

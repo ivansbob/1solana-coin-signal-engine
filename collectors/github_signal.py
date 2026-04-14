@@ -402,7 +402,20 @@ async def collect_github_candidates(max_candidates: int = 15):
     repos = await search_new_repos()
     enriched = []
     for repo in repos[:max_candidates]:
-        enriched.append({**repo, **calculate_dev_activity_score(repo)})
+        stars = repo.get("stargazers_count", 0)
+        forks = repo.get("forks_count", 0)
+
+        # Filter out noise: require stars >= 3 OR forks >= 1
+        if stars < 3 and forks < 1:
+            continue
+
+        score_data = calculate_dev_activity_score(repo)
+
+        # Discard if dev_activity_score == 0
+        if score_data.get("dev_activity_score", 0) == 0:
+            continue
+
+        enriched.append({**repo, **score_data})
     return enriched
 
 
@@ -422,8 +435,20 @@ async def collect_enhanced_github_candidates(max_candidates: int = 15):
     repos = await search_new_repos()
     enriched = []
     for repo in repos[:max_candidates]:
+        stars = repo.get("stargazers_count", 0)
+        forks = repo.get("forks_count", 0)
+
+        # Filter out noise: require stars >= 3 OR forks >= 1
+        if stars < 3 and forks < 1:
+            continue
+
         repo_full_name = repo.get("full_name", "")
         x_mentions = await enrich_with_x_signals(repo_full_name)
         enhanced = calculate_enhanced_dev_activity_score(repo, x_mentions)
+
+        # Discard if dev_activity_score == 0 or velocity_score == 0.0
+        if enhanced.get("dev_activity_score", 0) == 0 or enhanced.get("velocity_score", 0.0) == 0.0:
+            continue
+
         enriched.append({**repo, **enhanced})
     return enriched

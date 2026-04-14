@@ -4,16 +4,19 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List
-
-import aiohttp
+import websockets
+import base64
 
 logger = logging.getLogger(__name__)
 
 from utils.io import append_jsonl, write_json, ensure_dir
 from utils.rate_limit import async_acquire
 from utils.retry import with_retry
+from config.settings import load_settings
 
-PUMP_FUN_API_URL = "https://frontend-api.pump.fun/coins?offset=0&limit=80&sort=last_trade_timestamp&order=DESC"
+settings = load_settings()
+PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfX3lLzQ1N2e4vK5"
+HELIUS_WS_URL = f"wss://mainnet.helius-rpc.com/?api-key={settings.HELIUS_API_KEY}"
 
 # Успешные метрики 2026 (на основе реальных данных Pump.fun graduates)
 MIN_MARKET_CAP = 35_000          # начинаем смотреть отсюда
@@ -24,30 +27,106 @@ SCAM_FILTERS = ["dev", "team", "tax", "renounced", "locked", "burned"]  # кос
 
 
 async def fetch_pump_fun_coins() -> List[Dict]:
-    """Получаем актуальные токены в обход Cloudflare."""
+    """Fetch recent pump.fun tokens via Helius WebSocket logs monitoring."""
     await async_acquire("dex")
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Sec-Ch-Ua": '"Google Chrome";v="123", "Not:A-Brand";v="8", "Chromium";v="123"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Origin": "https://pump.fun",
-        "Referer": "https://pump.fun/"
-    }
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        try:
-            async with session.get(PUMP_FUN_API_URL) as resp:
-                if resp.status != 200:
-                    print(f"Pump.fun API error: {resp.status}")
-                    return[]
-                return await resp.json()
-        except Exception as e:
-            print(f"Pump.fun connection error: {e}")
-            return[]
+    collected_tokens = []
+    seen_mints = set()
+
+    async def subscribe_and_listen():
+        backoff = 1  # initial backoff in seconds
+        max_backoff = 60
+        while True:
+            try:
+                async with websockets.connect(HELIUS_WS_URL) as websocket:
+                    # Subscribe to logs for Pump.fun program
+                    subscribe_msg = {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "logsSubscribe",
+                        "params": [
+                            {"mentions": [PUMP_FUN_PROGRAM_ID]},
+                            {"commitment": "confirmed"}
+                        ]
+                    }
+                    await websocket.send(json.dumps(subscribe_msg))
+                    logger.info("Subscribed to Pump.fun program logs via Helius WebSocket")
+
+                    # Listen for messages
+                    async for message in websocket:
+                        try:
+                            data = json.loads(message)
+                            if "params" in data and "result" in data["params"]:
+                                logs = data["params"]["result"]["value"]["logs"]
+                                signature = data["params"]["result"]["value"]["signature"]
+
+                                # Parse logs for InitializeMint or Create events
+                                mint_address = parse_pump_fun_logs(logs)
+                                if mint_address and mint_address not in seen_mints:
+                                    seen_mints.add(mint_address)
+                                    token_data = {
+                                        "mint": mint_address,
+                                        "symbol": "UNKNOWN",  # Will be filled later if possible
+                                        "name": "Pump.fun Token",
+                                        "usd_market_cap": 0,  # Initial low
+                                        "virtual_sol_reserves": 0,
+                                        "reply_count": 0,
+                                        "last_trade_timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+                                        "buy_pressure": 0,
+                                        "v24hUSD": 0,
+                                        "unique_buyers_1h": 0,
+                                        "holder_count": 0,
+                                        "dev_sell_pressure_5m": 0,
+                                        "top10_holder_pct": 0.65
+                                    }
+                                    collected_tokens.append(token_data)
+                                    logger.info(f"New Pump.fun token detected: {mint_address}")
+
+                                    # Limit to recent tokens, e.g., last 50
+                                    if len(collected_tokens) >= 50:
+                                        break
+
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Failed to parse WS message: {e}")
+                            continue
+
+                    # Reset backoff on successful connection
+                    backoff = 1
+
+            except (websockets.exceptions.ConnectionClosed, asyncio.TimeoutError) as e:
+                logger.warning(f"WebSocket connection lost: {e}. Retrying in {backoff}s...")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)  # exponential backoff
+            except Exception as e:
+                logger.error(f"WebSocket error: {e}")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+
+    # Run the listener for a short time to collect recent tokens
+    try:
+        await asyncio.wait_for(subscribe_and_listen(), timeout=30)  # 30 seconds timeout
+    except asyncio.TimeoutError:
+        logger.info("WS monitoring timeout reached, returning collected tokens")
+
+    return collected_tokens
+
+
+def parse_pump_fun_logs(logs: List[str]) -> str:
+    """Parse Solana logs to extract new token mint addresses from Pump.fun events."""
+    for log in logs:
+        if "InitializeMint" in log or "Create" in log:
+            # Pump.fun typically creates tokens with specific instruction data
+            # Look for mint address in the logs or instruction data
+            # This is a simplified parser; in reality, you'd decode the instruction data
+            # For now, assume the mint is mentioned in logs
+            if "mint" in log.lower():
+                # Extract mint address - this is placeholder logic
+                # Real implementation would decode base64 instruction data
+                parts = log.split()
+                for part in parts:
+                    if len(part) == 44 and part.replace('_', '').isalnum():  # Base58 check approx
+                        return part
+    return None
 
 
 def calculate_graduation_score(coin: Dict[str, Any]) -> Dict[str, Any]:

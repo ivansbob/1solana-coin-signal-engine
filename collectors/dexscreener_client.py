@@ -232,7 +232,26 @@ def normalize_pair(
     first_window_sec: int = 60,
 ) -> dict[str, Any]:
     base_token = raw_pair.get("baseToken", {}) if isinstance(raw_pair.get("baseToken"), dict) else {}
-    token_address = str(base_token.get("address") or "")
+    quote_token = raw_pair.get("quoteToken", {}) if isinstance(raw_pair.get("quoteToken"), dict) else {}
+
+    # Fix inversion: if baseToken is SOL/WSOL, use quoteToken as the target meme coin
+    if str(base_token.get("symbol", "")).upper() in ("SOL", "WSOL"):
+        target_token = quote_token
+        token_address = str(quote_token.get("address") or "")
+    else:
+        target_token = base_token
+        token_address = str(base_token.get("address") or "")
+
+    # Ensure not using WSOL address as target
+    wsol_address = "So11111111111111111111111111111111111111112"
+    if token_address == wsol_address:
+        # If somehow WSOL is selected, try quoteToken
+        if str(quote_token.get("symbol", "")).upper() not in ("SOL", "WSOL"):
+            target_token = quote_token
+            token_address = str(quote_token.get("address") or "")
+        else:
+            # Invalid pair, skip
+            return {}
 
     pair_created_at, pair_created_at_ts = _to_iso_and_ts(raw_pair.get("pairCreatedAt"))
     seen_ts = int(discovery_seen_ts or pair_created_at_ts or 0)
@@ -252,8 +271,8 @@ def normalize_pair(
     return {
         "token_address": token_address,
         "pair_address": str(raw_pair.get("pairAddress") or ""),
-        "symbol": str(base_token.get("symbol") or ""),
-        "name": str(base_token.get("name") or ""),
+        "symbol": str(target_token.get("symbol") or ""),
+        "name": str(target_token.get("name") or ""),
         "chain": str(raw_pair.get("chainId") or "").lower(),
         "dex_id": str(raw_pair.get("dexId") or ""),
         "pair_created_at": pair_created_at,
