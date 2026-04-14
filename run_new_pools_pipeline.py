@@ -13,11 +13,14 @@ import csv
 from typing import List, Dict, Any
 from datetime import datetime
 import asyncio
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 
 # Add collectors to path
 sys.path.append(os.path.dirname(__file__))
 
-from collectors.raydium_pool_collector import get_recent_pools as get_raydium_pools
+from collectors.raydium_pool_collector import get_raydium_pools
 from collectors.pump_fun_collector import get_recent_pools as get_pump_pools
 from collectors.security_checker import check_token
 from collectors.github_signal import get_github_dev_score
@@ -45,8 +48,9 @@ async def run_pipeline(dry_run: bool = False) -> None:
 
     # Collect tokens from both sources
     logger.info("Collecting recent tokens...")
-    raydium_tokens = get_raydium_pools(50)
-    pump_tokens = get_pump_pools(50)
+    raydium_pools = await get_raydium_pools(50)
+    raydium_tokens = [pool['token_address'] for pool in raydium_pools]
+    pump_tokens = await get_pump_pools(50)
 
     # Combine and deduplicate
     all_tokens = list(set(raydium_tokens + pump_tokens))

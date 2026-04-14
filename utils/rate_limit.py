@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import asyncio
 from dataclasses import dataclass, field
 
 from config.settings import load_settings
@@ -27,6 +28,15 @@ class SoftLimiter:
         self.last_acquired = time.monotonic()
         return True
 
+    async def async_acquire(self, *, blocking: bool = True) -> bool:
+        wait_sec = self.remaining_wait()
+        if wait_sec > 0:
+            if not blocking:
+                return False
+            await asyncio.sleep(wait_sec)
+        self.last_acquired = time.monotonic()
+        return True
+
 
 _SETTINGS = load_settings()
 _INTERVAL = 0.05 if _SETTINGS.GLOBAL_RATE_LIMIT_ENABLED else 0.0
@@ -42,3 +52,8 @@ _LIMITERS = {
 def acquire(provider_name: str, *, blocking: bool = True) -> bool:
     limiter = _LIMITERS[provider_name]
     return limiter.acquire(blocking=blocking)
+
+
+async def async_acquire(provider_name: str, *, blocking: bool = True) -> bool:
+    limiter = _LIMITERS[provider_name]
+    return await limiter.async_acquire(blocking=blocking)

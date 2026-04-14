@@ -3,8 +3,8 @@ import asyncio
 from typing import Dict, Any, List
 
 from utils.cache import cache_get, cache_set
-from utils.rate_limit import acquire
-from utils.retry import with_retry
+from utils.rate_limit import async_acquire
+from utils.retry import async_with_retry
 from utils.clock import utc_now_iso
 
 # Импортируем всё, что уже есть в твоём репо
@@ -20,14 +20,14 @@ class SecurityAndArbChecker:
         self.dex_client = DexScreenerClient()
         self.cache_ttl_sec = 900  # 15 минут
 
-    @with_retry
+    @async_with_retry
     async def check_token(self, token_address: str, chain: str = "solana") -> Dict[str, Any]:
         cache_key = f"sec_arb_{chain}_{token_address}"
         cached = cache_get("dex", cache_key)
         if cached:
             return cached
 
-        await acquire("dex")
+        await async_acquire("dex")
 
         # === 1. SECURITY BLOCK ===
         honeypot_result = await check_honeypot(token_address, chain)

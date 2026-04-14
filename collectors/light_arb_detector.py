@@ -3,8 +3,8 @@ import asyncio
 from typing import List, Dict, Any
 
 from utils.cache import cache_get, cache_set
-from utils.rate_limit import acquire
-from utils.retry import with_retry
+from utils.rate_limit import async_acquire
+from utils.retry import async_with_retry
 from utils.clock import utc_now_iso
 
 from collectors.dexscreener_client import DexScreenerClient
@@ -15,10 +15,10 @@ class LightArbDetector:
         self.dex_client = DexScreenerClient()
         self.cache_ttl_sec = 600  # 10 минут (арбитраж живёт недолго)
 
-    @with_retry
+    @async_with_retry
     async def _get_dex_prices(self, token_address: str) -> Dict[str, float]:
         """Получаем цену на основных DEX через DexScreener"""
-        await acquire("dex")
+        await async_acquire("dex")
         
         pairs = await self.dex_client.get_pairs_by_token(token_address, limit=10)
         

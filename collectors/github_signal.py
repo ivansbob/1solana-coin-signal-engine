@@ -1,11 +1,12 @@
 import re
+import os
 import asyncio
 import time
 from typing import Dict, Any, List
 import aiohttp
 from dotenv import load_dotenv
 
-from utils.rate_limit import acquire
+from utils.rate_limit import async_acquire
 from utils.retry import with_retry
 from config.settings import Settings  # или load_settings()
 
@@ -90,7 +91,12 @@ AGENTIC_KEYWORDS = [
 
 async def search_new_repos() -> List[Dict]:
     """Поиск новых/активных репозиториев по нарративам 2026."""
-    async with aiohttp.ClientSession() as session:
+    headers = {}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"token {token}"
+
+    async with aiohttp.ClientSession(headers=headers) as session:
         query = (
             " ".join(KEYWORDS)
             + " language:Rust OR language:TypeScript OR language:Python created:>="
@@ -106,7 +112,7 @@ async def search_new_repos() -> List[Dict]:
             "per_page": MAX_REPOS,
         }
 
-        acquire("github")  # rate limit
+        await async_acquire("github")  # rate limit
 
         async with session.get(GITHUB_SEARCH_URL, params=params) as resp:
             if resp.status != 200:
@@ -397,6 +403,17 @@ async def collect_github_candidates(max_candidates: int = 15):
     for repo in repos[:max_candidates]:
         enriched.append({**repo, **calculate_dev_activity_score(repo)})
     return enriched
+
+
+async def get_github_dev_score(symbol: str) -> int:
+    """Get dev score for a token symbol based on GitHub activity"""
+    # Simple stub - in real implementation, search for repos with the symbol
+    repos = await search_new_repos()
+    for repo in repos:
+        if symbol.lower() in repo.get("name", "").lower():
+            score_data = calculate_dev_activity_score(repo)
+            return int(score_data.get("dev_activity_score", 50))
+    return 50  # default
 
 
 # Enhanced version with X signals and 2026 metrics

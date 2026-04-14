@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List
 
 from utils.cache import cache_get, cache_set
-from utils.rate_limit import acquire
-from utils.retry import with_retry
+from utils.rate_limit import async_acquire
+from utils.retry import async_with_retry
 from utils.clock import utc_now_iso
 
 # Импортируем существующие модули из твоего репо
@@ -25,7 +25,7 @@ class SecurityChecker:
         if cached:
             return cached
 
-        acquire("dex")
+        await async_acquire("dex")
 
         # 1. Honeypot check (Teycir-style)
         honeypot_result = await check_honeypot(token_address, chain)
@@ -101,3 +101,9 @@ class SecurityChecker:
                 f"Risk: {r['risk_level']}"
             )
         return "\n".join(lines) + "\n"
+
+
+async def check_token(token_address: str, chain: str = "solana") -> Dict[str, Any]:
+    """Convenience function to check a single token"""
+    checker = SecurityChecker()
+    return await checker.check_token(token_address, chain)

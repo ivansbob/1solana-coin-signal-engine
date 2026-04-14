@@ -10,7 +10,7 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 from utils.io import append_jsonl, write_json, ensure_dir
-from utils.rate_limit import acquire
+from utils.rate_limit import async_acquire
 from utils.retry import with_retry
 
 PUMP_FUN_API_URL = "https://frontend-api.pump.fun/coins?offset=0&limit=80&sort=last_trade_timestamp&order=DESC"
@@ -25,7 +25,7 @@ SCAM_FILTERS = ["dev", "team", "tax", "renounced", "locked", "burned"]  # кос
 
 async def fetch_pump_fun_coins() -> List[Dict]:
     """Получаем актуальные токены, отсортированные по последней торговле."""
-    await acquire("dex")  # используем существующий rate limiter
+    await async_acquire("dex")  # используем существующий rate limiter
 
     async with aiohttp.ClientSession() as session:
         async with session.get(PUMP_FUN_API_URL) as resp:
@@ -98,6 +98,12 @@ def calculate_graduation_score(coin: Dict[str, Any]) -> Dict[str, Any]:
         ],
         "provenance": "pump_fun_graduation_tracker_2026"
     }
+
+
+async def get_recent_pools(limit: int = 50) -> List[str]:
+    """Get list of recent pump.fun token addresses"""
+    high_potential = await run_pump_fun_graduation_tracker(limit)
+    return [token['token_address'] for token in high_potential]
 
 
 async def run_pump_fun_graduation_tracker(max_tokens: int = 50) -> List[Dict]:
