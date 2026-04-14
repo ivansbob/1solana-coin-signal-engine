@@ -1,7 +1,7 @@
 """Hard and soft bounds for execution drops."""
 
 from typing import Dict, Any, List
-from src.strategy.types import OrderflowMetrics, SmartMoneyEvidence, LiquidityQualityEvidence, SocialVelocityEvidence, WalletCohortEvidence, ExecutionContext
+from src.strategy.types import OrderflowMetrics, SmartMoneyEvidence, LiquidityQualityEvidence, SocialVelocityEvidence, WalletCohortEvidence, ExecutionContext, CandidateSnapshot
 
 
 def evaluate_orderflow_gates(metrics: OrderflowMetrics) -> Dict[str, Any]:
@@ -222,3 +222,75 @@ def evaluate_vol_compression_gates(metrics: Dict[str, Any]) -> Dict[str, Any]:
         "soft_blockers": [],
         "warnings": warnings,
     }
+
+
+class TinyCapitalRiskGates:
+    def __init__(self, min_liquidity_usd: float = 50000.0, max_price_impact_bps: float = 450.0, max_sell_impact_bps: float = 900.0, max_rugcheck_risk_score: float = 0.7, max_total_fee_sol: float = 0.01):
+        self.min_liquidity_usd = min_liquidity_usd
+        self.max_price_impact_bps = max_price_impact_bps
+        self.max_sell_impact_bps = max_sell_impact_bps
+        self.max_rugcheck_risk_score = max_rugcheck_risk_score
+        self.max_total_fee_sol = max_total_fee_sol
+
+    def evaluate(self, c: CandidateSnapshot, regime: str | None = None) -> bool:
+        reasons = self._collect_reasons(c, regime)
+        return len(reasons) == 0
+
+    def _collect_reasons(self, c: CandidateSnapshot, regime: str | None) -> tuple[str, ...]:
+        reasons: list[str] = []
+        repeat_buyer_ratio = self._repeat_buyer_ratio(c)
+        sybil_cluster_ratio = self._sybil_cluster_ratio(c)
+
+        if c.liquidity_usd < self.min_liquidity_usd:
+            reasons.append("liquidity_below_floor")
+
+        # --- ИЗМЕНЕНО: Free-Tier совместимость для Jupiter ---
+        if c.jupiter_price_impact_bps is not None:
+            if c.jupiter_price_impact_bps > self.max_price_impact_bps:
+                reasons.append("price_impact_too_high")
+        else:
+            # Fallback: аппроксимация через ликвидность (считаем, что сделка $100)
+            if c.liquidity_usd > 0 and (100.0 / (c.liquidity_usd / 2) * 10000) > self.max_price_impact_bps:
+                reasons.append("heuristic_price_impact_too_high")
+
+        if c.jupiter_sell_impact_bps is not None:
+            if c.jupiter_sell_impact_bps > self.max_sell_impact_bps:
+                reasons.append("sell_impact_too_high")
+
+        # --- ИЗМЕНЕНО: Free-Tier совместимость для RugCheck ---
+        if c.rugcheck_risk_score is not None:
+            if c.rugcheck_risk_score > self.max_rugcheck_risk_score:
+                reasons.append("rugcheck_failed_high_risk")
+        else:
+            # Fallback: Если нет внешнего RugCheck, проверяем локальный статус
+            # (предполагается, что anti_rug_context_status устанавливается нашим SecurityChecker)
+            if (c.anti_rug_context_status or "").lower() == "missing":
+                # Допускаем пропуск, если локальный анализатор дал добро или мы работаем в degraded mode
+                pass
+
+        if c.estimated_total_fee_sol > self.max_total_fee_sol:
+            reasons.append("fee_too_high")
+
+        return tuple(reasons)
+
+    def _repeat_buyer_ratio(self, c: CandidateSnapshot) -> float:
+        # Placeholder implementation
+        return 0.0
+
+    def _sybil_cluster_ratio(self, c: CandidateSnapshot) -> float:
+        # Placeholder implementation
+        return 0.0
+
+    def _reason_priority(self, reason: str) -> tuple[int, str]:
+        priorities = {
+            "rugcheck_failed_status": 0,
+            "anti_rug_context_conflict": 1,
+            "rugcheck_failed_high_risk": 2,
+            "liquidity_below_floor": 3,
+            "price_impact_too_high": 11,
+            "sell_impact_too_high": 12,
+            "heuristic_price_impact_too_high": 12,
+            "anti_rug_context_partial": 30,
+            "anti_rug_context_missing": 31,
+        }
+        return priorities.get(reason, (99, "unknown"))

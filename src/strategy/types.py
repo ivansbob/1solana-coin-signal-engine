@@ -133,7 +133,7 @@ class CandidateSnapshot(TypedDict):
      smart_money_inflows_1h_usd: float
      sybil_ratio: float
      base_price_sol: float
-     regime: str 
+     regime: str
      trend_evidence: TrendEvidence
      perp_context: PerpContext
      defi_health: DefiHealthEvidence
@@ -159,6 +159,12 @@ class CandidateSnapshot(TypedDict):
      new_buyers_ratio_24h: Optional[float]
      returning_buyers_ratio_24h: Optional[float]
      holder_churn_score: Optional[float]
+     liquidity_usd: float  # Alias for jupiter_liquidity_usd for gates
+     jupiter_price_impact_bps: Optional[float]
+     jupiter_sell_impact_bps: Optional[float]
+     rugcheck_risk_score: Optional[float]
+     estimated_total_fee_sol: float
+     anti_rug_context_status: Optional[str]
 
 class ExitSnapshot(TypedDict):
     gross_mark_to_market_pnl_pct: float

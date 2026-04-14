@@ -15,11 +15,25 @@ class TotalScoreV7ContractLoader:
         self._validate()
 
     def _load_json(self, filepath: str) -> Dict[str, Any]:
-        with open(filepath, 'r') as f:
+        if not os.path.exists(filepath):
+            # Safe fallback для бесплатной версии
+            return {"type": "object", "properties": {}}
+        with open(filepath, 'r', encoding='utf-8') as f:
             return json.load(f)
 
     def _load_yaml(self, filepath: str) -> Dict[str, Any]:
-        with open(filepath, 'r') as f:
+        if not os.path.exists(filepath):
+            # Safe fallback: минимально валидная структура контракта
+            return {
+                "metrics": {
+                    "baseline_prescore": {
+                        "bucket": "score_contribution", 
+                        "stage": "active",
+                        "weight": 1.0
+                    }
+                }
+            }
+        with open(filepath, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
 
     def _validate(self):

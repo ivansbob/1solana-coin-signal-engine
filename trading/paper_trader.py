@@ -155,14 +155,18 @@ def process_entry_signals(entry_signals: list[dict[str, Any]], market_states: li
         duplicate = get_open_position_by_token(state, str(signal.get("token_address") or ""))
         portfolio = state["portfolio"]
         max_positions_reached = int(portfolio.get("open_positions") or 0) >= int(settings.PAPER_MAX_CONCURRENT_POSITIONS)
-        if duplicate or max_positions_reached or float(portfolio.get("free_capital_sol") or 0.0) <= 0:
+
+        free_capital = float(portfolio.get("free_capital_sol") or 0.0)
+        min_required_capital = 0.02  # Защита от пыли (minimum usable balance)
+
+        if duplicate or max_positions_reached or free_capital <= min_required_capital:
             log_signal(
                 {
                     "ts": utc_now_iso(),
                     "event": "signal_rejected",
                     "token_address": signal.get("token_address"),
                     "decision": decision,
-                    "reason": "duplicate_or_capital_limit",
+                    "reason": "duplicate_or_capital_limit_or_dust",
                     **copy_wallet_family_contract_fields(signal),
                     "contract_version": settings.PAPER_CONTRACT_VERSION,
                 },
