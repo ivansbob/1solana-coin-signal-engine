@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, List
@@ -18,12 +19,16 @@ SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 VELOCITY_WEIGHTS = {"stars": 0.50, "forks": 0.30, "commits": 0.20}
 AGE_BONUS_DAYS = 30
 HIGH_VELOCITY_THRESHOLD = 15.0  # stars + forks per day
+LOOKBACK_HOURS = 72  # чуть больше для захвата ранних сигналов
 
 
 async def fetch_repos(keywords: List[str], max_repos: int = 30) -> List[Dict]:
+    # Обрезаем KEYWORDS до первых 5, чтобы не превысить лимит GitHub в 256 символов
+    top_keywords = keywords[:5]
     query = (
-        " ".join(keywords)
-        + " language:TypeScript OR language:Rust OR language:Python created:>=2025-01-01"
+        " OR ".join(top_keywords)
+        + " language:Rust created:>="
+        + time.strftime("%Y-%m-%d", time.gmtime(time.time() - LOOKBACK_HOURS * 3600))
     )
     params = {"q": query, "sort": "updated", "order": "desc", "per_page": max_repos}
 

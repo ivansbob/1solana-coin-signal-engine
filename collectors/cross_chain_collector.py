@@ -20,7 +20,7 @@ MIN_LIQUIDITY = 5000
 
 async def fetch_coingecko_new_pools(chain: str) -> List[Dict[str, Any]]:
     """Fetch new pools for a specific chain from CoinGecko Onchain API"""
-    url = f"{COINGECKO_BASE}/onchain/networks/{chain}/new_pools?include=dex"
+    url = f"https://api.geckoterminal.com/api/v2/networks/{chain}/new_pools"
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(url)
