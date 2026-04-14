@@ -15,6 +15,8 @@ from utils.retry import with_retry
 from config.settings import load_settings
 
 settings = load_settings()
+if not settings.HELIUS_API_KEY:
+    raise ValueError("HELIUS_API_KEY not set in environment or settings. Please set HELIUS_API_KEY in your .env file or environment variables.")
 PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfX3lLzQ1N2e4vK5"
 HELIUS_WS_URL = f"wss://mainnet.helius-rpc.com/?api-key={settings.HELIUS_API_KEY}"
 

@@ -253,6 +253,19 @@ def normalize_pair(
             # Invalid pair, skip
             return {}
 
+    # Skip stablecoins and known non-meme tokens
+    skip_symbols = {"USDC", "USDT", "WETH", "WAVAX", "WBTC", "SOL", "WSOL", "cbBTC", "cbETH"}
+    if str(target_token.get("symbol", "")).upper() in skip_symbols:
+        return {}
+
+    # Hard-ban EVM addresses for Solana engine
+    if token_address.startswith("0x"):
+        return {}
+
+    # Ensure Solana address format
+    if not (32 <= len(token_address) <= 44 and token_address.replace('_', '').isalnum()):
+        return {}
+
     pair_created_at, pair_created_at_ts = _to_iso_and_ts(raw_pair.get("pairCreatedAt"))
     seen_ts = int(discovery_seen_ts or pair_created_at_ts or 0)
     discovery_honesty = classify_discovery_honesty(

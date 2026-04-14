@@ -57,6 +57,11 @@ def normalize_pool_data(source: str, pool: Dict[str, Any]) -> Dict[str, Any]:
         # Ensure Solana address format
         if not (32 <= len(token_address) <= 44 and token_address.replace('_', '').isalnum()):
             return {}
+
+        # Skip stablecoins and known non-meme tokens
+        skip_symbols = {"USDC", "USDT", "WETH", "WAVAX", "WBTC", "SOL", "WSOL", "cbBTC", "cbETH"}
+        if symbol.upper() in skip_symbols:
+            return {}
         pair_address = pool.get("pairAddress", "")
         dex = pool.get("dexId", "unknown")
         liquidity_usd = pool.get("liquidity", {}).get("usd", 0.0)
