@@ -12,16 +12,15 @@ def load_json(filename: str) -> List[Dict[str, Any]]:
 
 def generate_llm_prompt() -> str:
     """Generate LLM prompt from latest data"""
-
-    # Load data
+    # Load data (Обновленные пути)
     candidates = load_json("data/processed/entry_candidates.json")
-    arb_opps = load_json("data/arb_opportunities.json")
+    arb_opps = load_json("data/processed/arb_opportunities.json") # <- Исправлен путь
 
-    # Sort arb opps by spread
-    arb_opps_sorted = sorted(arb_opps, key=lambda x: x.get("net_spread_pct", 0), reverse=True)[:10]
+    # Sort arb opps by spread (безопасный get)
+    arb_opps_sorted = sorted(arb_opps, key=lambda x: float(x.get("net_spread_pct", x.get("spread_pct", 0))), reverse=True)[:10]
 
-    # Sort candidates by smart_inflow_score
-    candidates_sorted = sorted(candidates, key=lambda x: x.get("smart_inflow_score", 0), reverse=True)[:15]
+    # Sort candidates by smart_inflow_score (защита от отсутствия ключа)
+    candidates_sorted = sorted(candidates, key=lambda x: float(x.get("smart_inflow_score", 0) or 0), reverse=True)[:15]
 
     # Build prompt
     prompt = f"""=== SYSTEM ROLE ===
