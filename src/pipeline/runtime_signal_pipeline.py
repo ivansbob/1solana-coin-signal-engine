@@ -259,6 +259,292 @@ def _build_market_states_payload(
     }
 
 
+async def run_live_pipeline(
+    *,
+    processed_dir: str | Path = "data/processed",
+    config_path: str | Path | None = None,
+    discovery_enabled: bool = True,
+    x_validation_enabled: bool = True,
+    enrichment_enabled: bool = True,
+    rug_enabled: bool = True,
+    scoring_enabled: bool = True,
+    entry_enabled: bool = True,
+    stage_overrides: dict[str, str | Path] | None = None,
+    helius_api_key: str | None = None,
+    jupiter_client: Any | None = None,
+    live_trader: Any | None = None,
+    trading_enabled: bool = False,
+) -> dict[str, Any]:
+    """Async live pipeline with real-time streaming and trading."""
+    import asyncio
+    import logging
+    from collectors.helius_ws_streamer import HeliusWsStreamer
+    from src.ingest.jupiter_api_client import JupiterClient
+    from trading.live_executor import LiveTrader
+    from src.ingest.jito_priority_context import JitoPriorityContextAdapter
+    from solders.keypair import Keypair
+    import os
+
+    logger = logging.getLogger(__name__)
+    del config_path  # reserved for future config-aware orchestration
+    overrides = {key: Path(value) for key, value in (stage_overrides or {}).items()}
+    processed = ensure_dir(processed_dir)
+    manifest = _manifest_base(processed)
+
+    # Initialize live trading components
+    helius_streamer = None
+    jito_adapter = JitoPriorityContextAdapter()
+    trader_keypair = None
+
+    if trading_enabled:
+        if not helius_api_key:
+            helius_api_key = os.environ.get("HELIUS_API_KEY")
+
+        if not jupiter_client:
+            jupiter_client = JupiterClient()
+
+        if not live_trader:
+            # Initialize trader with keypair from environment
+            private_key = os.environ.get("TRADER_PRIVATE_KEY")
+            if private_key:
+                trader_keypair = Keypair.from_base58_string(private_key)
+                live_trader = LiveTrader(
+                    payer_keypair=trader_keypair,
+                    jito_client=None,  # Will be initialized in LiveTrader
+                    jito_adapter=jito_adapter
+                )
+
+        # Initialize Helius streamer for real-time data
+        if helius_api_key:
+            helius_streamer = HeliusWsStreamer(api_key=helius_api_key)
+            # Start streaming in background
+            stream_task = asyncio.create_task(helius_streamer.start_stream())
+            logger.info("Started Helius WebSocket streamer")
+
+    try:
+        # Run the standard pipeline stages (discovery, validation, etc.)
+        manifest = await _run_live_pipeline_stages(
+            manifest=manifest,
+            processed=processed,
+            overrides=overrides,
+            discovery_enabled=discovery_enabled,
+            x_validation_enabled=x_validation_enabled,
+            enrichment_enabled=enrichment_enabled,
+            rug_enabled=rug_enabled,
+            scoring_enabled=scoring_enabled,
+            entry_enabled=entry_enabled,
+        )
+
+        # If trading is enabled, process signals in real-time
+        if trading_enabled and live_trader and helius_streamer:
+            logger.info("Starting live trading mode...")
+            await _run_live_trading_loop(
+                manifest=manifest,
+                processed=processed,
+                helius_streamer=helius_streamer,
+                live_trader=live_trader,
+                jupiter_client=jupiter_client,
+                jito_adapter=jito_adapter,
+            )
+
+        return manifest
+
+    finally:
+        # Cleanup
+        if helius_streamer:
+            await helius_streamer.stop_stream()
+        if jupiter_client and hasattr(jupiter_client, '__aexit__'):
+            await jupiter_client.__aexit__(None, None, None)
+
+
+async def _run_live_pipeline_stages(
+    manifest: dict[str, Any],
+    processed: Path,
+    overrides: dict[str, Path],
+    discovery_enabled: bool,
+    x_validation_enabled: bool,
+    enrichment_enabled: bool,
+    rug_enabled: bool,
+    scoring_enabled: bool,
+    entry_enabled: bool,
+) -> dict[str, Any]:
+    """Run the standard pipeline stages asynchronously."""
+    # This is the same logic as the synchronous version but can be made async if needed
+    shortlist_path = overrides.get("shortlist", _artifact_path(processed, "shortlist.json"))
+    x_validated_path = overrides.get("x_validated", _artifact_path(processed, "x_validated.json"))
+    enriched_path = overrides.get("enriched", _artifact_path(processed, "enriched_tokens.json"))
+    rug_path = overrides.get("rug", _artifact_path(processed, "rug_assessed_tokens.json"))
+    scored_path = overrides.get("scored", _artifact_path(processed, "scored_tokens.json"))
+    entry_path = overrides.get("entry", _artifact_path(processed, "entry_candidates.json"))
+    market_states_path = overrides.get("market_states", _artifact_path(processed, "market_states.json"))
+
+    # Discovery stage
+    if discovery_enabled and "shortlist" not in overrides:
+        shortlist_payload = _run_discovery(processed_dir=processed)
+        _record_stage(manifest, name="discovery", artifact_path=shortlist_path, payload=shortlist_payload, status="ok")
+    elif shortlist_path.exists():
+        shortlist_payload = load_json(shortlist_path)
+        _record_stage(manifest, name="discovery", artifact_path=shortlist_path, payload=shortlist_payload, status="skipped")
+    else:
+        _record_stage(manifest, name="discovery", artifact_path=shortlist_path, payload=None, status="failed", warning="missing_shortlist_input")
+        return manifest
+
+    # X validation stage
+    if x_validation_enabled and "x_validated" not in overrides:
+        x_validated_payload = run_x_validation_stage(processed_dir=processed, shortlist_path=shortlist_path)
+        _record_stage(manifest, name="x_validation", artifact_path=x_validated_path, payload=x_validated_payload, status="ok")
+    elif x_validated_path.exists():
+        x_validated_payload = load_json(x_validated_path)
+        _record_stage(manifest, name="x_validation", artifact_path=x_validated_path, payload=x_validated_payload, status="skipped")
+    else:
+        _record_stage(manifest, name="x_validation", artifact_path=x_validated_path, payload=None, status="failed", warning="missing_x_validated_input")
+        return manifest
+
+    # Enrichment stage
+    if enrichment_enabled and "enriched" not in overrides:
+        enriched_payload = run_onchain_enrichment_stage(processed_dir=processed, shortlist_path=shortlist_path, x_validated_path=x_validated_path)
+        _record_stage(manifest, name="enrichment", artifact_path=enriched_path, payload=enriched_payload, status="ok")
+    elif enriched_path.exists():
+        enriched_payload = load_json(enriched_path)
+        _record_stage(manifest, name="enrichment", artifact_path=enriched_path, payload=enriched_payload, status="skipped")
+    else:
+        _record_stage(manifest, name="enrichment", artifact_path=enriched_path, payload=None, status="failed", warning="missing_enriched_input")
+        return manifest
+
+    # Rug stage
+    if rug_enabled and "rug" not in overrides:
+        rug_payload = run_rug_stage(processed_dir=processed, enriched_path=enriched_path)
+        _record_stage(manifest, name="rug", artifact_path=rug_path, payload=rug_payload, status="ok")
+    elif rug_path.exists():
+        rug_payload = load_json(rug_path)
+        _record_stage(manifest, name="rug", artifact_path=rug_path, payload=rug_payload, status="skipped")
+    else:
+        _record_stage(manifest, name="rug", artifact_path=rug_path, payload=None, status="failed", warning="missing_rug_input")
+        return manifest
+
+    # Scoring stage
+    if scoring_enabled and "scored" not in overrides:
+        scored_payload = _run_scoring(processed_dir=processed, shortlist_path=shortlist_path, x_validated_path=x_validated_path, enriched_path=enriched_path, rug_path=rug_path)
+        _record_stage(manifest, name="scoring", artifact_path=scored_path, payload=scored_payload, status="ok")
+    elif scored_path.exists():
+        scored_payload = load_json(scored_path)
+        _record_stage(manifest, name="scoring", artifact_path=scored_path, payload=scored_payload, status="skipped")
+    else:
+        _record_stage(manifest, name="scoring", artifact_path=scored_path, payload=None, status="failed", warning="missing_scored_input")
+        return manifest
+
+    # Entry stage
+    if entry_enabled and "entry" not in overrides:
+        entry_payload = run_entry_stage(processed_dir=processed, scored_path=scored_path)
+        _record_stage(manifest, name="entry", artifact_path=entry_path, payload=entry_payload, status="ok")
+    elif entry_path.exists():
+        entry_payload = load_json(entry_path)
+        _record_stage(manifest, name="entry", artifact_path=entry_path, payload=entry_payload, status="skipped")
+    else:
+        _record_stage(manifest, name="entry", artifact_path=entry_path, payload=None, status="failed", warning="missing_entry_input")
+        return manifest
+
+    # Build market states
+    shortlist_payload = load_json(shortlist_path) if shortlist_path.exists() else {"shortlist": []}
+    scored_payload = load_json(scored_path) if scored_path.exists() else {"tokens": []}
+    enriched_payload = load_json(enriched_path) if enriched_path.exists() else {"tokens": []}
+    x_validated_payload = load_json(x_validated_path) if x_validated_path.exists() else {"tokens": []}
+
+    market_states_payload = _build_market_states_payload(
+        entry_payload=entry_payload,
+        scored_payload=scored_payload,
+        enriched_payload=enriched_payload,
+        x_validated_payload=x_validated_payload,
+        shortlist_payload=shortlist_payload,
+    )
+    write_json(market_states_path, market_states_payload)
+    _record_stage(manifest, name="market_states", artifact_path=market_states_path, payload=market_states_payload, status="ok")
+
+    return manifest
+
+
+async def _run_live_trading_loop(
+    manifest: dict[str, Any],
+    processed: Path,
+    helius_streamer: Any,
+    live_trader: Any,
+    jupiter_client: Any,
+    jito_adapter: Any,
+) -> None:
+    """Run the live trading loop with real-time data streaming."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Load initial market states and entry signals
+    market_states_path = processed / "market_states.json"
+    entry_path = processed / "entry_candidates.json"
+
+    if not market_states_path.exists() or not entry_path.exists():
+        logger.warning("Market states or entry signals not found, skipping live trading")
+        return
+
+    market_states = load_json(market_states_path).get("market_states", [])
+    entry_signals = load_json(entry_path).get("signals", [])
+
+    logger.info(f"Starting live trading with {len(entry_signals)} signals and {len(market_states)} market states")
+
+    # Initialize trading state
+    state = {
+        "portfolio": {
+            "total_value_sol": 100.0,  # Starting capital
+            "free_capital_sol": 100.0,
+            "open_positions": 0,
+            "total_positions_ever": 0,
+        },
+        "positions": [],
+        "paths": {
+            "base": processed,
+            "trades": processed / "trades",
+            "logs": processed / "logs",
+        },
+    }
+
+    # Process initial signals
+    if entry_signals:
+        logger.info(f"Processing {len(entry_signals)} initial entry signals")
+        await live_trader.process_live_entry_signals(
+            entry_signals=entry_signals,
+            market_states=market_states,
+            state=state,
+            settings=type('Settings', (), {
+                'LIVE_MAX_CONCURRENT_POSITIONS': 5,
+                'LIVE_CONTRACT_VERSION': 'live_trading_v1',
+            })(),
+            token_contexts=[],  # Can be enhanced later
+        )
+
+    # Main live trading loop
+    logger.info("Entering live trading loop...")
+    while True:
+        try:
+            # Get real-time update from WebSocket streamer
+            update = await helius_streamer.get_next_update()
+            if update:
+                logger.debug(f"Received update: {update.get('pubkey', 'unknown')}")
+
+                # Update market states with real-time data
+                # This would need more sophisticated logic to merge WebSocket updates
+                # with existing market states
+
+            # Check for exit signals (simplified - in real implementation would have
+            # exit logic based on real-time conditions)
+            # exit_signals = await check_exit_conditions(state, market_states)
+            # if exit_signals:
+            #     await live_trader.process_live_exit_signals(exit_signals, market_states, state, settings)
+
+            # Small delay to prevent busy looping
+            await asyncio.sleep(0.1)
+
+        except Exception as e:
+            logger.error(f"Error in live trading loop: {e}")
+            await asyncio.sleep(1.0)  # Longer delay on error
+
+
 def run_runtime_signal_pipeline(
     *,
     processed_dir: str | Path = "data/processed",

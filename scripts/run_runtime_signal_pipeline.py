@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 
-from src.pipeline.runtime_signal_pipeline import run_runtime_signal_pipeline
+from src.pipeline.runtime_signal_pipeline import run_runtime_signal_pipeline, run_live_pipeline
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Canonical runtime signal pipeline orchestrator")
     parser.add_argument("--processed-dir", default="data/processed")
     parser.add_argument("--config", default=None)
+    parser.add_argument("--live-mode", action="store_true", help="Enable live trading mode with real-time data streaming")
     parser.add_argument("--skip-discovery", action="store_true")
     parser.add_argument("--skip-x-validation", action="store_true")
     parser.add_argument("--skip-enrichment", action="store_true")
@@ -43,17 +45,35 @@ def main() -> int:
         }.items()
         if value
     }
-    manifest = run_runtime_signal_pipeline(
-        processed_dir=Path(args.processed_dir),
-        config_path=args.config,
-        discovery_enabled=not args.skip_discovery,
-        x_validation_enabled=not args.skip_x_validation,
-        enrichment_enabled=not args.skip_enrichment,
-        rug_enabled=not args.skip_rug,
-        scoring_enabled=not args.skip_scoring,
-        entry_enabled=not args.skip_entry,
-        stage_overrides=overrides,
-    )
+
+    if args.live_mode:
+        # Run async live pipeline
+        manifest = asyncio.run(run_live_pipeline(
+            processed_dir=Path(args.processed_dir),
+            config_path=args.config,
+            discovery_enabled=not args.skip_discovery,
+            x_validation_enabled=not args.skip_x_validation,
+            enrichment_enabled=not args.skip_enrichment,
+            rug_enabled=not args.skip_rug,
+            scoring_enabled=not args.skip_scoring,
+            entry_enabled=not args.skip_entry,
+            stage_overrides=overrides,
+            trading_enabled=True,  # Enable live trading in live mode
+        ))
+    else:
+        # Run synchronous pipeline
+        manifest = run_runtime_signal_pipeline(
+            processed_dir=Path(args.processed_dir),
+            config_path=args.config,
+            discovery_enabled=not args.skip_discovery,
+            x_validation_enabled=not args.skip_x_validation,
+            enrichment_enabled=not args.skip_enrichment,
+            rug_enabled=not args.skip_rug,
+            scoring_enabled=not args.skip_scoring,
+            entry_enabled=not args.skip_entry,
+            stage_overrides=overrides,
+        )
+
     print(json.dumps(manifest, sort_keys=True, ensure_ascii=False))
     return 0 if manifest.get("pipeline_status") in {"ok", "partial"} else 1
 
