@@ -87,6 +87,7 @@ class Settings:
     HELIUS_ENRICH_CACHE_TTL_SEC: int
     SOLANA_RPC_URL: str
     SOLANA_RPC_COMMITMENT: str
+    SOLANA_WALLET_PATH: Path
     SMART_WALLET_SEED_PATH: Path
     SMART_WALLET_HIT_WINDOW_SEC: int
     PROGRAM_ID_MAP_PATH: Path
@@ -540,6 +541,9 @@ def load_settings() -> Settings:
         ),
         SOLANA_RPC_COMMITMENT=str(
             _get_env(merged, "SOLANA_RPC_COMMITMENT", "confirmed")
+        ),
+        SOLANA_WALLET_PATH=_as_abs_path(
+            _get_env(merged, "SOLANA_WALLET_PATH", "~/.config/solana/id.json")
         ),
         SMART_WALLET_SEED_PATH=_as_abs_path(
             _get_env(merged, "SMART_WALLET_SEED_PATH", "data/seeds/smart_wallets.json")
