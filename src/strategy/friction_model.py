@@ -10,19 +10,24 @@ def _to_float(value: Any, default: float = -1.0) -> float:
     except (TypeError, ValueError):
         return default
 
-def estimate_total_friction_bps(token_ctx: Dict[str, Any]) -> float:
-    """Calculates all associated pipeline operational fees natively as basis points."""
-    base_fee = _to_float(token_ctx.get("base_fee_bps"))
-    priority_fee = _to_float(token_ctx.get("priority_fee_bps"))
-    jito_tip = _to_float(token_ctx.get("jito_tip_estimate_bps"))
+def estimate_total_friction_bps(token_ctx: Dict[str, Any], trade_size_usd: float = 100.0) -> float:
+    """Calculates operational fees AND dynamic AMM price impact."""
+    base_fee = _to_float(token_ctx.get("base_fee_bps"), 5.0)
+    priority_fee = _to_float(token_ctx.get("priority_fee_bps"), 10.0)
+    jito_tip = _to_float(token_ctx.get("jito_tip_estimate_bps"), 15.0)
     
-    # Missing data logic - missing network variables MUST be evaluated defensively
-    if base_fee < 0:
-        base_fee = 5.0 # Basic Solana operational bounds
-    if priority_fee < 0:
-        priority_fee = 10.0 # Standard network saturation
-    if jito_tip < 0:
-        jito_tip = 15.0 # Typical Jito tip for fast execution security
+    # --- НОВАЯ ЛОГИКА AMM IMPACT (Price Impact) ---
+    liquidity_usd = _to_float(token_ctx.get("liquidity_usd", 0.0))
+    amm_impact_bps = 0.0
+    
+    if liquidity_usd > 0:
+        # Аппроксимация сдвига цены для Constant Product AMM (x*y=k)
+        # Удваиваем ликвидность в делителе, так как USD ликвидность разделена на два токена
+        impact_pct = trade_size_usd / (liquidity_usd / 2)
+        amm_impact_bps = impact_pct * 10000  # конвертация в bps
         
-    return base_fee + priority_fee + jito_tip
+    # Каппируем скольжение на уровне 25% (2500 bps), чтобы избежать математических аномалий
+    amm_impact_bps = min(amm_impact_bps, 2500.0)
+        
+    return base_fee + priority_fee + jito_tip + amm_impact_bps
 

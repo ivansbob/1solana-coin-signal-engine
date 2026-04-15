@@ -43,6 +43,49 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+def compute_arb_spread_score(net_spread_pct: float | None) -> float:
+    if net_spread_pct is None:
+        return 0.0
+    if net_spread_pct > 1.0:
+        return 10.0
+    elif net_spread_pct > 0.5:
+        return 7.0
+    elif net_spread_pct > 0.2:
+        return 4.0
+    else:
+        return 0.0
+
+def compute_liquidity_velocity_score(volume_h1: float | None, liquidity_usd: float | None) -> float:
+    if volume_h1 is None or liquidity_usd is None or liquidity_usd == 0:
+        return 0.0
+    vel = volume_h1 / liquidity_usd
+    if vel > 5.0:
+        return 10.0
+    elif vel > 2.0:
+        return 7.0
+    elif vel > 1.0:
+        return 4.0
+    else:
+        return 0.0
+
+def compute_smart_money_score(smart_inflow_score: float | None) -> float:
+    return smart_inflow_score or 0.0
+
+def compute_cross_chain_arb_score(cross_chain_delta_pct: float | None) -> float:
+    if cross_chain_delta_pct is None:
+        return 0.0
+    if cross_chain_delta_pct > 1.0:
+        return 10.0
+    elif cross_chain_delta_pct > 0.5:
+        return 6.0
+    elif cross_chain_delta_pct > 0.2:
+        return 3.0
+    else:
+        return 0.0
+
+def compute_flash_loan_viability(viable: bool | None) -> float:
+    return 3.0 if viable else 0.0
+
 def _weighted_average(metrics: list[tuple[float | None, float]]) -> tuple[float, int]:
     present = [(value, weight) for value, weight in metrics if value is not None]
     if not present:

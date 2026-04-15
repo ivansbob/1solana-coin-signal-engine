@@ -1,132 +1,109 @@
-import requests
-import re
-import json
-import os
-from typing import Dict, Any, Optional, List
-from dotenv import load_dotenv
+# collectors/security_checker.py
+import asyncio
+from datetime import datetime, timezone
+from typing import Dict, Any, List
 
-HONEYPOT_PATTERNS = [
-    {"name": "balance_tx_origin", "regex": re.compile(r'function\s+balanceOf[^}]{0,500}(?:tx\.origin|origin\(\))', re.DOTALL | re.IGNORECASE)},
-    {"name": "allowance_tx_origin", "regex": re.compile(r'function\s+allowance[^}]{0,500}(?:tx\.origin|origin\(\))', re.DOTALL | re.IGNORECASE)},
-    {"name": "transfer_tx_origin", "regex": re.compile(r'function\s+transfer[^}]{0,500}(?:tx\.origin|origin\(\))', re.DOTALL | re.IGNORECASE)},
-    {"name": "hidden_fee_taxPayer", "regex": re.compile(r'function\s+_taxPayer[^}]{0,300}(?:tx\.origin|origin\(\))', re.DOTALL | re.IGNORECASE)},
-    {"name": "isSuper_tx_origin", "regex": re.compile(r'function\s+_isSuper[^}]{0,200}(?:tx\.origin|origin\(\))', re.DOTALL | re.IGNORECASE)},
-    {"name": "tx_origin_require", "regex": re.compile(r'require\s*\(\s*[^)]{0,500}?tx\.origin', re.DOTALL | re.IGNORECASE)},
-    {"name": "tx_origin_if_auth", "regex": re.compile(r'if\s*\(\s*[^)]{0,200}?tx\.origin\s*[!=]=[^)]{0,200}?\)\s*(?:revert|require)', re.DOTALL | re.IGNORECASE)},
-    {"name": "tx_origin_assert", "regex": re.compile(r'assert\s*\(\s*[^)]{0,200}?tx\.origin', re.DOTALL | re.IGNORECASE)},
-    {"name": "tx_origin_mapping", "regex": re.compile(r'\[\s*tx\.origin\s*\]\s*=', re.DOTALL | re.IGNORECASE)},
-    {"name": "sell_block_pattern", "regex": re.compile(r'if\s*\(\s*_isSuper\s*\(\s*recipient\s*\)\s*\)\s*return\s+false', re.DOTALL | re.IGNORECASE)},
-    {"name": "asymmetric_transfer_logic", "regex": re.compile(r'function\s+_canTransfer[^}]{0,500}return\s+false', re.DOTALL | re.IGNORECASE)},
-    {"name": "transfer_whitelist_only", "regex": re.compile(r'require\s*\(\s*_whitelist\[[^\]]{0,200}\]\s*\|\|\s*_whitelist\[[^\]]{0,200}\]\s*,', re.DOTALL | re.IGNORECASE)},
-    {"name": "hidden_sell_tax", "regex": re.compile(r'if\s*\([^)]{0,200}pair[^)]{0,200}\)[^{]{0,500}\{[^}]{0,500}sellTax\s*=\s*(?:100|99|98|97|96|95)', re.DOTALL | re.IGNORECASE)},
-]
+from utils.cache import cache_get, cache_set
+from utils.rate_limit import async_acquire
+from utils.retry import async_with_retry
+from utils.clock import utc_now_iso
 
-MIN_PATTERNS_FOR_DETECTION = 2
+# Импортируем существующие модули из твоего репо
+from collectors.honeypot_simulator import check_honeypot  # или как у тебя называется
+from collectors.rug_engine import assess_rug_risk
+from collectors.authority_checks import check_solana_authorities
+from collectors.dev_risk_checks import check_dev_risk
 
-def parse_source_code(source_code: str) -> str:
-    normalized = source_code.strip()
-    if normalized.startswith('{{') and normalized.endswith('}}'):
-        normalized = normalized[1:-1]
-    if normalized.startswith('{'):
-        try:
-            data = json.loads(normalized)
-            if isinstance(data, dict) and 'sources' in data:
-                combined = ''
-                for filename, file_obj in data.get('sources', {}).items():
-                    content = file_obj.get('content') if isinstance(file_obj, dict) else None
-                    if content:
-                        combined += f"// File: {filename}\n{content}\n\n"
-                return combined if combined else source_code
-        except Exception:
-            pass
-    return source_code
 
-def detect_honeypot(source_code: str) -> Dict[str, Any]:
-    if not source_code or len(source_code) < 50:
-        return {"is_honeypot": False, "matched_count": 0, "patterns": [], "risk_score": 0}
-    source_code = source_code[:500 * 1024]
-    matches: List[Dict] = []
-    for p in HONEYPOT_PATTERNS:
-        try:
-            for match in p["regex"].finditer(source_code):
-                line = source_code[:match.start()].count('\n') + 1
-                matches.append({"name": p["name"], "line": line, "snippet": match.group(0)[:120]})
-        except Exception:
-            continue
-    is_honeypot = len(matches) >= MIN_PATTERNS_FOR_DETECTION
-    risk_score = min(10, len(matches) * 3)
-    return {
-        "is_honeypot": is_honeypot,
-        "matched_count": len(matches),
-        "patterns": matches[:15],
-        "risk_score": risk_score,
-        "status": "HONEYPOT" if is_honeypot else "SUSPICIOUS" if matches else "SAFE"
-    }
+class SecurityChecker:
+    def __init__(self):
+        self.cache_ttl_sec = 1800  # 30 минут
 
-def fetch_contract_source(address: str, chain: str = "ethereum", etherscan_api_key: str = "") -> Optional[str]:
-    chain_configs = {
-        "ethereum": 1, "eth": 1, "polygon": 137, "matic": 137,
-        "arbitrum": 42161, "arb": 42161, "bnb": 56, "bsc": 56,
-        "base": 8453, "optimism": 10, "op": 10,
-        "avalanche": 43114, "avax": 43114,
-        "fantom": 250, "ftm": 250,
-    }
-    chain_lower = chain.lower().strip()
-    chain_id = chain_configs.get(chain_lower)
-    if not chain_id:
-        return None
-    url = f"https://api.etherscan.io/v2/api?chainid={chain_id}&module=contract&action=getsourcecode&address={address}"
-    if etherscan_api_key:
-        url += f"&apikey={etherscan_api_key}"
-    try:
-        resp = requests.get(url, timeout=15)
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        if str(data.get("status")) != "1" or not data.get("result"):
-            return None
-        result = data["result"][0]
-        source = result.get("SourceCode")
-        if not source:
-            return None
-        return parse_source_code(source)
-    except Exception:
-        return None
+    async def check_token(self, token_address: str, chain: str = "solana") -> Dict[str, Any]:
+        cache_key = f"security_{chain}_{token_address}"
+        cached = cache_get("dex", cache_key)
+        if cached:
+            return cached
 
-def honeypot_check_teycir(token_address: str, chain: str = "ethereum", etherscan_api_key: str = "") -> Dict[str, Any]:
-    load_dotenv()
-    if not etherscan_api_key:
-        etherscan_api_key = os.getenv("ETHERSCAN_API_KEY", "")
-    result: Dict[str, Any] = {
-        "source": "teycir_honeypotscan",
-        "token_address": token_address.lower(),
-        "chain": chain,
-        "is_honeypot": False,
-        "risk_score": 0,
-        "reasons": [],
-        "status": "unknown",
-        "matched_patterns": []
-    }
-    try:
-        source_code = fetch_contract_source(token_address, chain, etherscan_api_key)
-        if not source_code:
-            result.update({"status": "source_not_verified", "reasons": ["Source code not verified on block explorer"]})
-            return result
-        detection = detect_honeypot(source_code)
-        result.update({
-            "is_honeypot": detection["is_honeypot"],
-            "risk_score": detection["risk_score"],
-            "matched_patterns": [p["name"] for p in detection["patterns"]],
-            "status": detection["status"],
-            "reasons": [f"Matched {len(detection['patterns'])} honeypot patterns"] if detection["patterns"] else ["No dangerous patterns detected"]
-        })
-    except Exception as e:
-        result.update({"status": "error", "reasons": [f"Scan error: {str(e)[:120]}"]})
-    return result
+        await async_acquire("dex")
 
-if __name__ == "__main__":
-    import json
-    key = os.getenv("ETHERSCAN_API_KEY", "")
-    test_addr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-    result = honeypot_check_teycir(test_addr, chain="ethereum", etherscan_api_key=key)
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+        # 1. Honeypot check (Teycir-style)
+        honeypot_result = await check_honeypot(token_address, chain)
+
+        # 2. Rug assessment (RugWatch-style)
+        rug_result = assess_rug_risk(token_address, chain)
+
+        # 3. Solana-specific authority checks
+        authority_result = {}
+        if chain == "solana":
+            authority_result = await check_solana_authorities(token_address)
+
+        # 4. Dev risk
+        dev_result = check_dev_risk(token_address)
+
+        # === Объединяем в единый вердикт ===
+        honeypot = honeypot_result.get("is_honeypot", False)
+        rug_score = float(rug_result.get("rug_score", 0.0))
+        authority_risk = authority_result.get("risk_score", 0.0)
+
+        final_rug_score = round((rug_score + authority_risk + (10.0 if honeypot else 0.0)) / 3, 2)
+
+        if final_rug_score >= 7.5 or honeypot:
+            risk_level = "HIGH"
+            verdict = "BLOCK"
+        elif final_rug_score >= 4.0:
+            risk_level = "MEDIUM"
+            verdict = "WARN"
+        else:
+            risk_level = "LOW"
+            verdict = "PASS"
+
+        result = {
+            "token_address": token_address,
+            "honeypot": honeypot,
+            "rug_score": final_rug_score,
+            "risk_level": risk_level,
+            "verdict": verdict,
+            "reasons": self._build_reasons(honeypot_result, rug_result, authority_result, dev_result),
+            "solana_specific": authority_result,
+            "checked_at": utc_now_iso(),
+        }
+
+        cache_set("dex", cache_key, result, ttl_sec=self.cache_ttl_sec)
+        return result
+
+    def _build_reasons(self, honeypot_res, rug_res, authority_res, dev_res) -> List[str]:
+        reasons = []
+        if honeypot_res.get("is_honeypot"):
+            reasons.append("honeypot_patterns_detected")
+        if rug_res.get("lp_locked") is False:
+            reasons.append("liquidity_not_locked")
+        if authority_res.get("freeze_authority_active"):
+            reasons.append("freeze_authority_active")
+        if authority_res.get("mint_authority_active"):
+            reasons.append("mint_authority_active")
+        if dev_res.get("dev_sell_pressure_high"):
+            reasons.append("high_dev_sell_pressure")
+        return reasons[:6]  # не больше 6 причин
+
+    async def check_batch(self, token_addresses: List[str], chain: str = "solana") -> List[Dict[str, Any]]:
+        tasks = [self.check_token(addr, chain) for addr in token_addresses]
+        return await asyncio.gather(*tasks)
+
+    def build_security_text_section(self, results: List[Dict[str, Any]]) -> str:
+        lines = ["=== SECURITY CHECK (Honeypot + Rug + Authority) ==="]
+        for r in results:
+            status = "✅ PASS" if r["verdict"] == "PASS" else "⚠️ WARN" if r["verdict"] == "WARN" else "❌ BLOCK"
+            lines.append(
+                f"{status} {r['token_address'][:8]}... | "
+                f"Rug: {r['rug_score']:.1f} | "
+                f"Honeypot: {'YES' if r['honeypot'] else 'no'} | "
+                f"Risk: {r['risk_level']}"
+            )
+        return "\n".join(lines) + "\n"
+
+
+async def check_token(token_address: str, chain: str = "solana") -> Dict[str, Any]:
+    """Convenience function to check a single token"""
+    checker = SecurityChecker()
+    return await checker.check_token(token_address, chain)

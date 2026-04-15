@@ -13,8 +13,15 @@ class SQLiteRunStore:
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        # Добавлен timeout=15.0 для ожидания снятия блокировки другими потоками
+        conn = sqlite3.connect(self.path, timeout=15.0)
         conn.row_factory = sqlite3.Row
+
+        # Включаем WAL (Write-Ahead Logging) для конкурентного чтения/записи
+        conn.execute("PRAGMA journal_mode=WAL;")
+        # Нормализуем синхронизацию для ускорения I/O
+        conn.execute("PRAGMA synchronous=NORMAL;")
+
         return conn
 
     def _ensure_schema(self) -> None:

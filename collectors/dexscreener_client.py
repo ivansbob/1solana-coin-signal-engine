@@ -232,7 +232,39 @@ def normalize_pair(
     first_window_sec: int = 60,
 ) -> dict[str, Any]:
     base_token = raw_pair.get("baseToken", {}) if isinstance(raw_pair.get("baseToken"), dict) else {}
-    token_address = str(base_token.get("address") or "")
+    quote_token = raw_pair.get("quoteToken", {}) if isinstance(raw_pair.get("quoteToken"), dict) else {}
+
+    # Fix inversion: if baseToken is SOL/WSOL, use quoteToken as the target meme coin
+    if str(base_token.get("symbol", "")).upper() in ("SOL", "WSOL"):
+        target_token = quote_token
+        token_address = str(quote_token.get("address") or "")
+    else:
+        target_token = base_token
+        token_address = str(base_token.get("address") or "")
+
+    # Ensure not using WSOL address as target
+    wsol_address = "So11111111111111111111111111111111111111112"
+    if token_address == wsol_address:
+        # If somehow WSOL is selected, try quoteToken
+        if str(quote_token.get("symbol", "")).upper() not in ("SOL", "WSOL"):
+            target_token = quote_token
+            token_address = str(quote_token.get("address") or "")
+        else:
+            # Invalid pair, skip
+            return {}
+
+    # Skip stablecoins and known non-meme tokens
+    skip_symbols = {"USDC", "USDT", "WETH", "WAVAX", "WBTC", "SOL", "WSOL", "cbBTC", "cbETH"}
+    if str(target_token.get("symbol", "")).upper() in skip_symbols:
+        return {}
+
+    # Hard-ban EVM addresses for Solana engine
+    if token_address.startswith("0x"):
+        return {}
+
+    # Ensure Solana address format
+    if not (32 <= len(token_address) <= 44 and token_address.replace('_', '').isalnum()):
+        return {}
 
     pair_created_at, pair_created_at_ts = _to_iso_and_ts(raw_pair.get("pairCreatedAt"))
     seen_ts = int(discovery_seen_ts or pair_created_at_ts or 0)
@@ -252,8 +284,8 @@ def normalize_pair(
     return {
         "token_address": token_address,
         "pair_address": str(raw_pair.get("pairAddress") or ""),
-        "symbol": str(base_token.get("symbol") or ""),
-        "name": str(base_token.get("name") or ""),
+        "symbol": str(target_token.get("symbol") or ""),
+        "name": str(target_token.get("name") or ""),
         "chain": str(raw_pair.get("chainId") or "").lower(),
         "dex_id": str(raw_pair.get("dexId") or ""),
         "pair_created_at": pair_created_at,
@@ -267,3 +299,40 @@ def normalize_pair(
         "discovery_source_mode": discovery_source_mode,
         "discovery_source_confidence": discovery_source_confidence,
     }
+
+
+class DexScreenerClient:
+    async def get_trending_pairs(self, limit: int = 15) -> list[dict[str, Any]]:
+        """Get trending pairs from DexScreener"""
+        import asyncio
+        import httpx
+
+        # This is a simplified implementation - in practice, you'd use DexScreener's trending API
+        # For now, we'll use the existing fetch functions
+        # Note: fetch_latest_solana_pairs is sync, so we run it in thread pool
+        pairs = await asyncio.get_event_loop().run_in_executor(None, fetch_latest_solana_pairs)
+        # Normalize to expected format
+        normalized = []
+        for pair in pairs[:limit]:
+            norm = normalize_pair(pair)
+            if norm:
+                # Add required fields
+                norm.setdefault("age_minutes", 0)
+                norm.setdefault("volume_1h", norm.get("volume_h1", 0))
+                norm.setdefault("liquidity_usd", norm.get("liquidity_usd", 0))
+                normalized.append(norm)
+        return normalized
+
+    async def get_pairs_by_token(self, token_address: str, limit: int = 100) -> list[dict[str, Any]]:
+        import httpx
+        url = f"https://api.dexscreener.com/latest/dex/search?q={token_address}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    pairs = resp.json().get("pairs",[])
+                    # Применяем лимит к финальному списку
+                    return [normalize_pair(p) for p in pairs if isinstance(p, dict)][:limit]
+        except Exception:
+            pass
+        return[]
