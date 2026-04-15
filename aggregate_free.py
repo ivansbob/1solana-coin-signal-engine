@@ -30,6 +30,8 @@ async def main():
 
     args = parser.parse_args()
 
+    settings = Settings()  # или load_settings() если у тебя уже есть
+
     logger.info(f"Starting Free Discovery Aggregation with Moon Score Engine (max={args.max_candidates})")
 
     aggregator = FreeDiscoveryAggregator(max_candidates=args.max_candidates)
@@ -56,11 +58,21 @@ async def main():
             high_moon = [t for t in collected_data["new_pools"] if t.get("moon_score", 0) >= 70]
             logger.info(f"Found {len(high_moon)} high-potential tokens (Moon Score ≥ 70)")
 
-        # ====================== ARB SCANNER ======================
+        # ====================== ARB SCANNER + FLASH LOAN EXECUTION ======================
         logger.info("Scanning for arbitrage opportunities...")
         arb_opportunities = await scan_arb_opportunities()
         collected_data["arb_opportunities"] = arb_opportunities
         logger.info(f"Found {len(arb_opportunities)} arbitrage opportunities")
+
+        # ====================== FLASH-LOAN EXECUTOR ======================
+        logger.info("Executing high-score arbitrage via Flash Loan + Jupiter...")
+        from trading.flash_loan_executor import execute_flash_loan_jupiter_arb
+        executed = []
+        for opp in [o for o in arb_opportunities if o.get("action") == "ARB" and o.get("arb_score", 0) >= 60]:
+            result = await execute_flash_loan_jupiter_arb(opp, settings, output_dir)  # settings нужно добавить в main()
+            executed.append(result)
+        logger.info(f"Executed {len(executed)} flash-loan arbs")
+        collected_data["flash_loan_executions"] = executed
 
         # ====================== FLASH-LOAN EXECUTOR ======================
         logger.info("Executing high-score arbitrage via Flash Loan + Jupiter...")
@@ -132,7 +144,8 @@ async def main():
   "symbol": string,
   "token_address": string,
   "moon_score": number,
-  "arb_score": number | null,
+  "arb_score": number,
+  "flash_loan_ready": boolean,
   "curve_progress": number | null,
   "action": "BUY" | "SCALP" | "ARB" | "WATCH" | "IGNORE",
   "confidence": "HIGH" | "MEDIUM" | "LOW",

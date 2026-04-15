@@ -153,6 +153,12 @@ async def process_entry_signals(entry_signals: list[dict[str, Any]], market_stat
             continue
 
         if decision == "ARB":
+            # Flash-loan executor вместо обычного paper_buy
+            from trading.flash_loan_executor import execute_flash_loan_jupiter_arb
+            result = await execute_flash_loan_jupiter_arb(signal, settings, paths["trades"].parent)
+            if result.get("status") == "success":
+                log_trade({**signal, "event": "paper_flash_loan_arb", "tx": result.get("tx")}, paths)
+            continue
             # Используем flash-loan executor вместо обычного paper_buy
             from trading.flash_loan_executor import execute_flash_loan_jupiter_arb
             result = await execute_flash_loan_jupiter_arb(signal, settings, paths["trades"].parent)
