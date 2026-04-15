@@ -5,6 +5,7 @@ import httpx
 from datetime import datetime, timezone
 
 from utils.cache import cache_get, cache_set
+from config.settings import load_settings
 
 
 @dataclass
@@ -51,6 +52,8 @@ class JupiterQuoteClient:
         """
         Get arbitrage quotes: quote1 (WSOL -> TOKEN) and quote2 (TOKEN -> WSOL)
         """
+        settings = load_settings()
+
         # Check cache first
         cache_key = f"jup_arb_{base_mint}_{quote_mint}_{amount_in}_{slippage_bps}"
         cached_result = cache_get("dex", cache_key)
@@ -127,7 +130,7 @@ class JupiterQuoteClient:
                 )
 
                 # Cache the result
-                cache_set("dex", cache_key, result.__dict__, ttl_sec=30)
+                cache_set("dex", cache_key, result.__dict__, ttl_sec=settings.JUPITER_ARB_CACHE_TTL_SEC)
 
                 return result
 

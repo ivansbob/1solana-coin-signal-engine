@@ -46,42 +46,14 @@ async def main():
             min_profit_pct=settings.JUPITER_ARB_MIN_PROFIT_PCT,
             max_concurrency=settings.JUPITER_ARB_MAX_CONCURRENCY,
             use_lite_api=settings.JUPITER_ARB_USE_LITE_API,
-            slippage_bps=settings.JUPITER_ARB_SLIPPAGE_BPS
+            slippage_bps=settings.JUPITER_ARB_SLIPPAGE_BPS,
+            use_light_prescreening=True  # Pre-screen with LightArbDetector (arb_spread_score >= 4)
         )
         arb_opportunities = await scanner.scan_tokens(collected_data.get("new_pools", []))
         collected_data["arb_opportunities"] = [vars(o) for o in arb_opportunities]
 
         high_arb = [o for o in arb_opportunities if o.arb_score >= 60]
         logger.info(f"Found {len(high_arb)} high-confidence arbitrage opportunities (Score ≥ 60)")
-
-        # ====================== ARB SCANNER + FLASH LOAN EXECUTION ======================
-        logger.info("Scanning for arbitrage opportunities...")
-        arb_opportunities = await scan_arb_opportunities()
-        collected_data["arb_opportunities"] = arb_opportunities
-        logger.info(f"Found {len(arb_opportunities)} arbitrage opportunities")
-
-        # ====================== FLASH-LOAN EXECUTOR ======================
-        logger.info("Executing high-score arbitrage via Flash Loan + Jupiter...")
-        from trading.flash_loan_executor import execute_flash_loan_jupiter_arb
-        executed = []
-        for opp in [o for o in arb_opportunities if o.get("action") == "ARB" and o.get("arb_score", 0) >= 60]:
-            result = await execute_flash_loan_jupiter_arb(opp, settings, output_dir)  # settings нужно добавить в main()
-            executed.append(result)
-        logger.info(f"Executed {len(executed)} flash-loan arbs")
-        collected_data["flash_loan_executions"] = executed
-
-        # ====================== FLASH-LOAN EXECUTOR ======================
-        logger.info("Executing high-score arbitrage via Flash Loan + Jupiter...")
-        from trading.flash_loan_executor import execute_flash_loan_jupiter_arb
-        from config.settings import load_settings
-        settings = load_settings()
-        executed = []
-        for opp in collected_data["arb_opportunities"]:
-            if opp.get("action") == "ARB" and opp.get("arb_score", 0) >= 60:
-                result = await execute_flash_loan_jupiter_arb(opp, settings, Path("data/processed"))
-                executed.append(result)
-        logger.info(f"Executed {len(executed)} flash-loan arbs")
-        collected_data["flash_loan_executions"] = executed
 
         # ====================== BUILD AGGREGATE TEXT ======================
         aggregate_text = await aggregator.build_aggregate_text(collected_data)
@@ -92,7 +64,9 @@ async def main():
 
         # Добавляем Arb Coding Agent Prompt
         if arb_opportunities:
-            arb_prompt = generate_arb_coding_agent_prompt(arb_opportunities)
+            from analytics.arb_scanner import from_jupiter_opportunities
+            arb_dicts = from_jupiter_opportunities(arb_opportunities)
+            arb_prompt = generate_arb_coding_agent_prompt(arb_dicts)
             aggregate_text += "\n\n" + arb_prompt
 
         # ====================== SAVE HISTORY AND OUTPUT ======================

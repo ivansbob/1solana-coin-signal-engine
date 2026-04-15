@@ -162,7 +162,8 @@ class TestJupiterArbScanner:
         return JupiterArbScanner(
             amount_in_lamports=1000000000,
             min_profit_pct=1.0,
-            max_concurrency=2
+            max_concurrency=2,
+            use_light_prescreening=False  # Disable pre-screening for unit tests
         )
 
     @pytest.fixture
