@@ -261,6 +261,18 @@ class Settings:
     CONFIG_SUGGESTIONS_TRAINING_WHEELS_MODE: bool
     CONFIG_SUGGESTIONS_CONTRACT_VERSION: str
 
+    # Jupiter Arb Scanner
+    JUPITER_ARB_ENABLED: bool
+    JUPITER_ARB_USE_LITE_API: bool
+    JUPITER_ARB_AMOUNT_IN_SOL: float
+    JUPITER_ARB_MIN_PROFIT_PCT: float
+    JUPITER_ARB_MAX_PRICE_IMPACT_PCT: float
+    JUPITER_ARB_MAX_CONCURRENCY: int
+    JUPITER_ARB_PRIORITY_FEE_LAMPORTS: int
+    JUPITER_ARB_JITO_TIP_LAMPORTS: int
+    JUPITER_ARB_CACHE_TTL_SEC: int
+    JUPITER_ARB_SLIPPAGE_BPS: int
+
 
 def _read_dotenv(dotenv_path: str = ".env") -> dict[str, str]:
     path = Path(dotenv_path)
@@ -1158,10 +1170,10 @@ def load_settings() -> Settings:
             ),
             key="CONFIG_SUGGESTIONS_MIN_SAMPLE",
         ),
-        CONFIG_SUGGESTIONS_TRAINING_WHEELS_MODE=_as_bool(
-            _get_env(merged, "CONFIG_SUGGESTIONS_TRAINING_WHEELS_MODE", "true"),
-            key="CONFIG_SUGGESTIONS_TRAINING_WHEELS_MODE",
-        ),
+    CONFIG_SUGGESTIONS_TRAINING_WHEELS_MODE=_as_bool(
+        _get_env(merged, "CONFIG_SUGGESTIONS_TRAINING_WHEELS_MODE", "true"),
+        key="CONFIG_SUGGESTIONS_TRAINING_WHEELS_MODE",
+    ),
         CONFIG_SUGGESTIONS_CONTRACT_VERSION=str(
             _get_env(
                 merged,
@@ -1169,4 +1181,34 @@ def load_settings() -> Settings:
                 "config_suggestions_v1",
             )
         ),
+        JUPITER_ARB_ENABLED=_as_bool(
+            _get_env(merged, "JUPITER_ARB_ENABLED", "true"), key="JUPITER_ARB_ENABLED"
+        ),
+        JUPITER_ARB_USE_LITE_API=_as_bool(
+            _get_env(merged, "JUPITER_ARB_USE_LITE_API", "false"), key="JUPITER_ARB_USE_LITE_API"
+        ),
+        JUPITER_ARB_AMOUNT_IN_SOL=_as_positive_float(
+            _get_env(merged, "JUPITER_ARB_AMOUNT_IN_SOL", "1.0"), key="JUPITER_ARB_AMOUNT_IN_SOL"
+        ),
+        JUPITER_ARB_MIN_PROFIT_PCT=_as_non_negative_float(
+            _get_env(merged, "JUPITER_ARB_MIN_PROFIT_PCT", "0.15"), key="JUPITER_ARB_MIN_PROFIT_PCT"
+        ),
+        JUPITER_ARB_MAX_PRICE_IMPACT_PCT=_as_non_negative_float(
+            _get_env(merged, "JUPITER_ARB_MAX_PRICE_IMPACT_PCT", "1.0"), key="JUPITER_ARB_MAX_PRICE_IMPACT_PCT"
+        ),
+        JUPITER_ARB_MAX_CONCURRENCY=_as_positive_int(
+            _get_env(merged, "JUPITER_ARB_MAX_CONCURRENCY", "5"), key="JUPITER_ARB_MAX_CONCURRENCY"
+        ),
+        JUPITER_ARB_PRIORITY_FEE_LAMPORTS=_as_positive_int(
+            _get_env(merged, "JUPITER_ARB_PRIORITY_FEE_LAMPORTS", "5000"), key="JUPITER_ARB_PRIORITY_FEE_LAMPORTS"
+        ),
+        JUPITER_ARB_JITO_TIP_LAMPORTS=_as_positive_int(
+            _get_env(merged, "JUPITER_ARB_JITO_TIP_LAMPORTS", "10000"), key="JUPITER_ARB_JITO_TIP_LAMPORTS"
+        ),
+        JUPITER_ARB_CACHE_TTL_SEC=_as_positive_int(
+            _get_env(merged, "JUPITER_ARB_CACHE_TTL_SEC", "30"), key="JUPITER_ARB_CACHE_TTL_SEC"
+        ),
+        JUPITER_ARB_SLIPPAGE_BPS=_as_positive_int(
+            _get_env(merged, "JUPITER_ARB_SLIPPAGE_BPS", "1"), key="JUPITER_ARB_SLIPPAGE_BPS"
+        )
     )

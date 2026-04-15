@@ -12,8 +12,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from collectors.free_discovery_aggregator import FreeDiscoveryAggregator
-from collectors.moon_score_engine import calculate_moon_score   # ← Новый импорт
+from collectors.jupiter_arb_scanner import JupiterArbScanner   # ← Новый импорт
 from analytics.arb_scanner import scan_arb_opportunities, generate_arb_coding_agent_prompt  # ← Arb scanner import
+from config.settings import load_settings
 
 # Setup logging
 logging.basicConfig(
@@ -30,7 +31,7 @@ async def main():
 
     args = parser.parse_args()
 
-    settings = Settings()  # или load_settings() если у тебя уже есть
+    settings = load_settings()
 
     logger.info(f"Starting Free Discovery Aggregation with Moon Score Engine (max={args.max_candidates})")
 
@@ -39,24 +40,19 @@ async def main():
     try:
         collected_data = await aggregator.collect_all()
 
-        # ====================== MOON SCORE ENGINE ======================
-        if "new_pools" in collected_data and collected_data["new_pools"]:
-            logger.info(f"Applying Moon Score to {len(collected_data['new_pools'])} tokens...")
+        # ====================== JUPITER ARB SCANNER ======================
+        scanner = JupiterArbScanner(
+            amount_in_lamports=int(settings.JUPITER_ARB_AMOUNT_IN_SOL * 1_000_000_000),  # SOL to lamports
+            min_profit_pct=settings.JUPITER_ARB_MIN_PROFIT_PCT,
+            max_concurrency=settings.JUPITER_ARB_MAX_CONCURRENCY,
+            use_lite_api=settings.JUPITER_ARB_USE_LITE_API,
+            slippage_bps=settings.JUPITER_ARB_SLIPPAGE_BPS
+        )
+        arb_opportunities = await scanner.scan_tokens(collected_data.get("new_pools", []))
+        collected_data["arb_opportunities"] = [vars(o) for o in arb_opportunities]
 
-            scored_pools = []
-            for token in collected_data["new_pools"]:
-                scored = calculate_moon_score(token)
-                scored_pools.append(scored)
-
-            # Сортируем по Moon Score (самые горячие сверху)
-            collected_data["new_pools"] = sorted(
-                scored_pools,
-                key=lambda x: x.get("moon_score", 0),
-                reverse=True
-            )
-
-            high_moon = [t for t in collected_data["new_pools"] if t.get("moon_score", 0) >= 70]
-            logger.info(f"Found {len(high_moon)} high-potential tokens (Moon Score ≥ 70)")
+        high_arb = [o for o in arb_opportunities if o.arb_score >= 60]
+        logger.info(f"Found {len(high_arb)} high-confidence arbitrage opportunities (Score ≥ 60)")
 
         # ====================== ARB SCANNER + FLASH LOAN EXECUTION ======================
         logger.info("Scanning for arbitrage opportunities...")
@@ -90,11 +86,9 @@ async def main():
         # ====================== BUILD AGGREGATE TEXT ======================
         aggregate_text = await aggregator.build_aggregate_text(collected_data)
 
-        # Добавляем Moon Score Summary в начало отчёта
-        moon_summary = "\n## MOON SCORE SUMMARY (Zero-LLM Heuristic)\n"
-        moon_summary += f"Total tokens analyzed: {len(collected_data.get('new_pools', []))}\n"
-        moon_summary += f"High Moon Score (≥70): {len([t for t in collected_data.get('new_pools', []) if t.get('moon_score', 0) >= 70])}\n\n"
-        aggregate_text = moon_summary + aggregate_text
+        # Добавляем Jupiter Arb Scanner Summary в начало отчёта
+        arb_section = scanner.to_daily_aggregate_section(arb_opportunities)
+        aggregate_text = arb_section + "\n\n" + aggregate_text
 
         # Добавляем Arb Coding Agent Prompt
         if arb_opportunities:

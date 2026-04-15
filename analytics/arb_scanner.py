@@ -100,10 +100,41 @@ async def scan_arb_opportunities() -> List[Dict[str, Any]]:
     })
     return enriched
 
+def from_jupiter_opportunities(opportunities: List) -> List[Dict]:
+    """
+    Convert ArbOpportunity objects to format compatible with generate_arb_coding_agent_prompt()
+    """
+    result = []
+    for opp in opportunities:
+        # Convert ArbOpportunity dataclass to dict
+        if hasattr(opp, '__dict__'):
+            opp_dict = vars(opp)
+        else:
+            opp_dict = opp
+
+        # Map fields to expected format
+        converted = {
+            "symbol": opp_dict.get("symbol", "UNKNOWN"),
+            "token_address": opp_dict.get("token_address", ""),
+            "arb_score": opp_dict.get("arb_score", 0),
+            "spread_pct": opp_dict.get("profit_pct", 0),  # Map profit_pct to spread_pct
+            "cross_chain_listed": False,  # Jupiter arb is on-chain only
+            "route_label": opp_dict.get("route_label", ""),
+            "price_impact_pct": opp_dict.get("price_impact_pct", 0),
+            "profit_lamports": opp_dict.get("profit_lamports", 0),
+            "flash_loan_ready": opp_dict.get("arb_score", 0) >= 60,
+            "action": "ARB" if opp_dict.get("arb_score", 0) >= 60 else "WATCH",
+            "scanned_at": opp_dict.get("scanned_at", ""),
+            "provenance": "jupiter_arb_scanner_2026"
+        }
+        result.append(converted)
+    return result
+
+
 def generate_arb_coding_agent_prompt(opportunities: List[Dict]) -> str:
     """Промпт для coding-агента (автономный arb/sniper)"""
     lines = ["# Multi-Chain Arbitrage Opportunity → Coding Agent Prompt 2026",
-             "Ты — Autonomous Solana + L2 Arbitrage Agent.\n"]
+              "Ты — Autonomous Solana + L2 Arbitrage Agent.\n"]
     for opp in sorted(opportunities, key=lambda x: x.get("arb_score", 0), reverse=True)[:8]:
         if opp.get("arb_score", 0) < 60:
             continue
