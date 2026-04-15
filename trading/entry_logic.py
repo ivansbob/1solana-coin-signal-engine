@@ -109,6 +109,28 @@ def decide_entry(token_ctx: dict[str, Any], settings: Any) -> dict[str, Any]:
     if result["entry_decision"] not in _ALLOWED_DECISIONS:
         raise ValueError(f"Unhandled entry decision: {result['entry_decision']}")
 
+    # Add slippage control and execution routing
+    decision = result["entry_decision"]
+    if decision == "SCALP":
+        result["max_slippage_bps"] = 150  # Higher slippage tolerance for scalp trades
+    elif decision == "TREND":
+        result["max_slippage_bps"] = 50   # Lower slippage tolerance for trend trades
+    else:
+        result["max_slippage_bps"] = 100  # Default
+
+    # Determine execution route based on token risk factors
+    token_risk_score = float(token_ctx.get("sandwich_attack_risk_score", 0.0))
+    liquidity_depth = float(token_ctx.get("liquidity_depth_usd", 0.0))
+    social_velocity = float(token_ctx.get("social_velocity_10m", 0.0))
+
+    # Route to Jito if high risk of sandwich attacks or high social velocity
+    use_jito = (
+        token_risk_score > 0.7 or  # High sandwich attack risk
+        social_velocity > 100 or   # High social momentum
+        liquidity_depth < 50000    # Low liquidity pools
+    )
+    result["execution_route"] = "jito" if use_jito else "rpc"
+
     result.update(compute_entry_position_contract(token_ctx, result, settings))
     result["entry_snapshot"] = build_entry_snapshot(token_ctx)
     return result
