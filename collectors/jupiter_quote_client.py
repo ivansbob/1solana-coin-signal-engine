@@ -4,6 +4,8 @@ import asyncio
 import httpx
 from datetime import datetime, timezone
 
+from utils.cache import cache_get, cache_set
+
 
 @dataclass
 class ArbQuoteResult:
@@ -49,6 +51,13 @@ class JupiterQuoteClient:
         """
         Get arbitrage quotes: quote1 (WSOL -> TOKEN) and quote2 (TOKEN -> WSOL)
         """
+        # Check cache first
+        cache_key = f"jup_arb_{base_mint}_{quote_mint}_{amount_in}_{slippage_bps}"
+        cached_result = cache_get("dex", cache_key)
+        if cached_result:
+            # Convert cached dict back to ArbQuoteResult
+            return ArbQuoteResult(**cached_result)
+
         wsol_mint = "So11111111111111111111111111111111111111112"
 
         # Quote 1: WSOL -> TOKEN
@@ -116,6 +125,9 @@ class JupiterQuoteClient:
                     is_profitable=profit_lamports > 0,
                     price_impact_pct=price_impact_pct
                 )
+
+                # Cache the result
+                cache_set("dex", cache_key, result.__dict__, ttl_sec=30)
 
                 return result
 

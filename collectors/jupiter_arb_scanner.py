@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from .jupiter_quote_client import JupiterQuoteClient, ArbQuoteResult
 from .jupiter_route_filter import is_viable
+from .light_arb_detector import LightArbDetector
 from utils.logger import log_info, log_warning
 
 
@@ -24,13 +25,16 @@ class ArbOpportunity:
 
 class JupiterArbScanner:
     def __init__(self, amount_in_lamports: int = 1_000_000_000, min_profit_pct: float = 0.15,
-                 max_concurrency: int = 5, use_lite_api: bool = False, slippage_bps: int = 0):
+                 max_concurrency: int = 5, use_lite_api: bool = False, slippage_bps: int = 0,
+                 use_light_prescreening: bool = True):
         self.amount_in_lamports = amount_in_lamports
         self.min_profit_pct = min_profit_pct
         self.max_concurrency = max_concurrency
         self.use_lite_api = use_lite_api
         self.slippage_bps = slippage_bps
+        self.use_light_prescreening = use_light_prescreening
         self.client = JupiterQuoteClient()
+        self.light_detector = LightArbDetector()
 
     async def _scan_single_token(self, token: Dict[str, Any]) -> Optional[ArbOpportunity]:
         """Scan a single token for arbitrage opportunities"""
@@ -80,6 +84,18 @@ class JupiterArbScanner:
 
     async def scan_tokens(self, tokens: List[Dict[str, Any]], wsol_mint: str = "So11111111111111111111111111111111111111112") -> List[ArbOpportunity]:
         """Scan multiple tokens concurrently"""
+        # Light pre-screening to filter tokens with potential arbitrage
+        if self.use_light_prescreening:
+            try:
+                log_info("arb_light_prescreen_start", total_tokens=len(tokens))
+                pre_screened_tokens = await self.light_detector.enrich_with_arb_data(tokens)
+                filtered_tokens = [t for t in pre_screened_tokens if t.get("arb_spread_score", 0) >= 4]
+                log_info("arb_light_prescreen_complete", filtered_tokens=len(filtered_tokens), total_tokens=len(tokens))
+                tokens = filtered_tokens
+            except Exception as e:
+                log_warning("arb_light_prescreen_failed", error=str(e), fallback_to_all=True)
+                # Fallback: continue with all tokens if DexScreener is unavailable
+
         semaphore = asyncio.Semaphore(self.max_concurrency)
 
         async def scan_with_semaphore(token: Dict[str, Any]) -> Optional[ArbOpportunity]:
