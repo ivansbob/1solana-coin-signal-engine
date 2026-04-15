@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 import time
@@ -673,7 +674,7 @@ def _build_runtime_trading_settings(cfg: dict[str, Any], args: argparse.Namespac
     return SimpleNamespace(**settings)
 
 
-def main() -> int:
+async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--mode", required=True, choices=["shadow", "constrained_paper", "expanded_paper", "paused"])
@@ -760,17 +761,17 @@ def main() -> int:
     state.setdefault("runtime_metrics", {})
 
     for loop_idx in range(args.max_loops):
-        roll_daily_state_if_needed(state)
+        # ====================== LOAD + NORMALIZE SIGNALS ======================
         signals, signal_summary = _load_normalized_signals(args, loop_idx)
         latest_signal_summary = signal_summary
         _emit_signal_batch_events(event_log, args.run_id, signal_summary)
         _increment_runtime_health_counters(state, signals)
-        opened = 0
-        rejected = 0
 
+        # ====================== REFRESH MARKET STATES ======================
         current_states = _build_current_states(state, signals)
         current_state_summary = _summarize_current_states(current_states)
         _accumulate_runtime_metrics(state, current_state_summary)
+
         _append_run_artifact(
             event_log,
             {
@@ -780,90 +781,62 @@ def main() -> int:
                 **current_state_summary,
             },
         )
+
+        # ====================== MARK-TO-MARKET + EXITS ======================
         if _state_open_positions(state):
             run_mark_to_market(state, current_states, trading_settings)
             exit_signals = decide_exits(_state_open_positions(state), current_states, trading_settings)
             state = process_exit_signals(exit_signals, current_states, state, trading_settings)
             _sync_open_positions_compat(state)
-            _append_run_artifact(
-                event_log,
-                {
-                    "ts": utc_now_iso(),
-                    "event": "runtime_exit_processing_completed",
-                    "run_id": args.run_id,
-                    "evaluated_positions": len(exit_signals),
-                    "full_exit_count": len([row for row in exit_signals if row.get("exit_decision") == "FULL_EXIT"]),
-                    "partial_exit_count": len([row for row in exit_signals if row.get("exit_decision") == "PARTIAL_EXIT"]),
-                },
-            )
 
+        # ====================== FLASH-LOAN + PAPER ENTRY ======================
         market_states = _build_market_states(signals)
         _update_runtime_market_state_cache(state, market_states)
-        _prune_runtime_market_state_cache(
-            state,
-            market_states,
-            event_log=event_log,
-            max_cache_age_sec=int(cfg.get("runtime", {}).get("runtime_market_cache_ttl_sec", 21_600) or 21_600),
-            max_cache_entries=int(cfg.get("runtime", {}).get("runtime_market_cache_max_entries", 512) or 512),
-        )
+        _prune_runtime_market_state_cache(state, market_states, event_log=event_log)
+
+        opened = 0
+        rejected = 0
+
         for signal in signals:
             token_address = str(signal.get("token_address") or "").strip()
             if not token_address:
                 total_invalid += 1
-                _append_run_artifact(
-                    event_log,
-                    {
-                        "ts": utc_now_iso(),
-                        "event": "runtime_signal_invalid",
-                        "run_id": args.run_id,
-                        "signal_id": signal.get("signal_id"),
-                        "reason": "missing_token_address",
-                    },
-                )
                 continue
 
             observe_x_signal(signal, state, cfg)
             guard_results = evaluate_entry_guards(signal, state, cfg)
-            sizing, preserve_canonical_sizing = _resolved_runtime_entry_sizing(
-                signal,
-                compute_position_sizing(signal, state, cfg),
-            )
+            sizing = compute_position_sizing(signal, state, cfg)
             scale = float(sizing.get("effective_position_scale", 0.0))
-            runtime_position_pct = float(
-                signal.get("recommended_position_pct")
-                or sizing.get("effective_position_pct")
-                or sizing.get("base_position_pct")
-                or 0.0
-            )
-            runtime_base_position_pct = float(sizing.get("base_position_pct") or 0.0) if preserve_canonical_sizing else runtime_position_pct
-            runtime_effective_position_pct = float(sizing.get("effective_position_pct") or 0.0) if preserve_canonical_sizing else runtime_position_pct
-            signal.update(
-                {
-                    "base_position_pct": runtime_base_position_pct,
-                    "effective_position_pct": runtime_effective_position_pct,
-                    "sizing_multiplier": sizing.get("sizing_multiplier"),
-                    "sizing_reason_codes": sizing.get("sizing_reason_codes", []),
-                    "sizing_confidence": sizing.get("sizing_confidence"),
-                    "sizing_origin": sizing.get("sizing_origin"),
-                    "sizing_warning": sizing.get("sizing_warning"),
-                    "evidence_quality_score": sizing.get("evidence_quality_score"),
-                    "evidence_conflict_flag": sizing.get("evidence_conflict_flag"),
-                    "partial_evidence_flag": sizing.get("partial_evidence_flag"),
-                }
-            )
-            signal.setdefault("symbol", signal.get("token_address"))
-            signal.setdefault("entry_snapshot", signal.get("entry_snapshot") or {"price_usd": _signal_price(signal)})
-            signal["entry_snapshot"].setdefault("price_usd", _signal_price(signal))
-            signal["entry_snapshot"].setdefault("liquidity_usd", signal.get("liquidity_usd"))
-            signal["entry_snapshot"].setdefault("buy_pressure", signal.get("buy_pressure"))
-            signal["entry_snapshot"].setdefault("volume_velocity", signal.get("volume_velocity"))
-            signal["entry_snapshot"].setdefault("x_validation_score", signal.get("x_validation_score"))
-            signal["entry_snapshot"].setdefault("x_status", signal.get("x_status"))
-            signal["contract_version"] = trading_settings.PAPER_CONTRACT_VERSION
 
-            if signal.get("x_status") == "degraded":
-                register_degraded_x_entry_attempt(state, blocked=bool(should_block_entry(guard_results) or scale <= 0))
+            signal.update({
+                "base_position_pct": float(signal.get("recommended_position_pct") or sizing.get("effective_position_pct") or 0.0),
+                "effective_position_pct": float(signal.get("recommended_position_pct") or sizing.get("effective_position_pct") or 0.0),
+                "sizing_multiplier": sizing.get("sizing_multiplier"),
+                "sizing_reason_codes": sizing.get("sizing_reason_codes", []),
+                "sizing_confidence": sizing.get("sizing_confidence"),
+                "sizing_origin": sizing.get("sizing_origin"),
+                "sizing_warning": sizing.get("sizing_warning"),
+                "evidence_quality_score": sizing.get("evidence_quality_score"),
+                "evidence_conflict_flag": sizing.get("evidence_conflict_flag"),
+                "partial_evidence_flag": sizing.get("partial_evidence_flag"),
+            })
 
+            # === FLASH-LOAN ARB EXECUTION ===
+            if signal.get("action") == "ARB" and signal.get("arb_score", 0) >= 60:
+                from trading.flash_loan_executor import execute_flash_loan_jupiter_arb
+                result = await execute_flash_loan_jupiter_arb(signal, trading_settings, run_dir)
+                if result.get("status") == "success":
+                    opened += 1
+                    total_opened += 1
+                    log_trade({**signal, "event": "paper_flash_loan_arb", "tx": result.get("tx")}, state["paths"])
+                    if signal.get("x_status") == "degraded":
+                        register_degraded_x_entry_opened(state)
+                else:
+                    rejected += 1
+                    total_rejected += 1
+                continue
+
+            # === Обычный paper entry (SCALP / TREND) ===
             if should_block_entry(guard_results) or scale <= 0:
                 rejected += 1
                 total_rejected += 1
@@ -895,101 +868,22 @@ def main() -> int:
                         "sizing_warning": sizing.get("sizing_warning"),
                     },
                 )
-                _append_run_artifact(
-                    event_log,
-                    {
-                        "ts": utc_now_iso(),
-                        "event": "runtime_real_signal_rejected",
-                        "run_id": args.run_id,
-                        "signal_id": signal.get("signal_id"),
-                        "token_address": signal.get("token_address"),
-                        "signal_origin": signal.get("runtime_signal_origin"),
-                        "signal_status": signal.get("runtime_signal_status"),
-                        "reason": guard_results.get("hard_block_reasons", []) or sizing.get("sizing_reason_codes", []),
-                        "degraded_x_guard": guard_results.get("degraded_x_guard", {}),
-                    },
-                )
                 continue
 
+            # Обычный entry
             before_open = len(_state_open_positions(state))
-            entry_signal = dict(signal)
-            entry_signal["base_position_pct"] = runtime_base_position_pct
-            entry_signal["effective_position_pct"] = runtime_effective_position_pct
-            state = process_entry_signals([entry_signal], market_states, state, trading_settings)
-            opened_position = next(
-                (
-                    position
-                    for position in _state_open_positions(state)
-                    if position.get("token_address") == signal.get("token_address")
-                ),
-                None,
-            )
-            if opened_position is not None:
-                opened_position["base_position_pct"] = runtime_base_position_pct
-                opened_position["effective_position_pct"] = runtime_effective_position_pct
+            state = process_entry_signals([signal], market_states, state, trading_settings)
             after_open = len(_state_open_positions(state))
             opened_delta = max(after_open - before_open, 0)
-            if opened_delta > 0:
-                opened += opened_delta
-                total_opened += opened_delta
-                if signal.get("x_status") == "degraded":
-                    for _ in range(opened_delta):
-                        register_degraded_x_entry_opened(state)
-                for _ in range(opened_delta):
-                    update_trade_counters(state, pnl_pct=0.0)
-                _append_run_artifact(
-                    decisions_log,
-                    {
-                        "ts": utc_now_iso(),
-                        "token_address": signal.get("token_address"),
-                        "signal_id": signal.get("signal_id"),
-                        "mode": args.mode,
-                        "decision": "open_paper_position",
-                        "decision_reason_codes": guard_results.get("soft_reasons", []),
-                        "x_status": signal.get("x_status", "healthy"),
-                        "guard_results": guard_results,
-                        "degraded_x_guard": guard_results.get("degraded_x_guard", {}),
-                        "effective_position_scale": scale,
-                        "signal_origin": signal.get("runtime_signal_origin"),
-                        "signal_status": signal.get("runtime_signal_status"),
-                        "recommended_position_pct": signal.get("recommended_position_pct"),
-                        "base_position_pct": sizing.get("base_position_pct"),
-                        "effective_position_pct": sizing.get("effective_position_pct"),
-                        "sizing_multiplier": sizing.get("sizing_multiplier"),
-                        "sizing_reason_codes": sizing.get("sizing_reason_codes", []),
-                        "sizing_confidence": sizing.get("sizing_confidence"),
-                        "sizing_origin": sizing.get("sizing_origin"),
-                        "evidence_quality_score": sizing.get("evidence_quality_score"),
-                        "evidence_conflict_flag": sizing.get("evidence_conflict_flag"),
-                        "partial_evidence_flag": sizing.get("partial_evidence_flag"),
-                        "sizing_warning": sizing.get("sizing_warning"),
-                    },
-                )
-            else:
-                rejected += 1
-                total_rejected += 1
+            opened += opened_delta
+            total_opened += opened_delta
 
-            _append_run_artifact(
-                event_log,
-                {
-                    "ts": utc_now_iso(),
-                    "event": "evidence_weighted_sizing_completed",
-                    "run_id": args.run_id,
-                    "signal_id": signal.get("signal_id"),
-                    "token_address": signal.get("token_address"),
-                    "base_position_pct": sizing.get("base_position_pct"),
-                    "effective_position_pct": sizing.get("effective_position_pct"),
-                    "sizing_multiplier": sizing.get("sizing_multiplier"),
-                    "reason_codes": sizing.get("sizing_reason_codes", []),
-                    "sizing_confidence": sizing.get("sizing_confidence"),
-                },
-            )
+            if opened_delta > 0 and signal.get("x_status") == "degraded":
+                register_degraded_x_entry_opened(state)
 
         _sync_open_positions_compat(state)
-        print(
-            f"[promotion] signals_processed count={len(signals)} opened={opened} rejected={rejected} "
-            f"origin={signal_summary.get('selected_origin')} status={signal_summary.get('batch_status')}"
-        )
+
+        print(f"[promotion] signals_processed count={len(signals)} opened={opened} rejected={rejected} flash_loans={len([s for s in signals if s.get('action') == 'ARB'])}")
         if not args.dry_run:
             time.sleep(cfg.get("runtime", {}).get("loop_interval_sec", 30))
 
@@ -1102,8 +996,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as exc:  # noqa: BLE001
-        print(f"[promotion][error] stage=runtime message={exc}")
-        raise
+    exit(asyncio.run(main()))
