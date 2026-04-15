@@ -126,7 +126,7 @@ def process_exit_signals(exit_signals: list[dict[str, Any]], market_states: list
     return state
 
 
-def process_entry_signals(entry_signals: list[dict[str, Any]], market_states: list[dict[str, Any]], state: dict[str, Any], settings: Any) -> dict[str, Any]:
+async def process_entry_signals(entry_signals: list[dict[str, Any]], market_states: list[dict[str, Any]], state: dict[str, Any], settings: Any) -> dict[str, Any]:
     ensure_state(state, settings)
     markets = _market_index(market_states)
     paths = state["paths"]
@@ -150,6 +150,14 @@ def process_entry_signals(entry_signals: list[dict[str, Any]], market_states: li
 
         decision = signal.get("entry_decision")
         if decision == "IGNORE":
+            continue
+
+        if decision == "ARB":
+            # Используем flash-loan executor вместо обычного paper_buy
+            from trading.flash_loan_executor import execute_flash_loan_jupiter_arb
+            result = await execute_flash_loan_jupiter_arb(signal, settings, paths["trades"].parent)
+            if result["status"] == "success":
+                log_trade({**signal, "event": "paper_flash_loan_arb", "tx": result["tx"]}, paths)
             continue
 
         duplicate = get_open_position_by_token(state, str(signal.get("token_address") or ""))

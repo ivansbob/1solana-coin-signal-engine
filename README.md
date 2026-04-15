@@ -366,3 +366,7 @@ See `docs/offline_feature_importance.md` for the target definitions, grouping lo
 - active freeze authority is treated as a hard-blocking rug risk in safe-default flows
 - Token-2022 mutable sellability extensions (for example permanent delegate, frozen default account state, active transfer-fee authority) can trigger a hard block
 - common exchange / aggregator / bridge funders are sanitized before they count toward shared-funder graph, linkage, or wallet-family evidence
+
+## Flash Loan Jupiter Arbitrage
+
+Now supports automatic flash-loan arbitrage execution when `arb_score >= 60`. Integrates with moshthepitt/flash-loan-mastery for on-chain flash loans combined with Jupiter swaps in a single transaction.
